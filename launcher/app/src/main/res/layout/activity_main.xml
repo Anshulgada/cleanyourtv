@@ -335,8 +335,11 @@
                 <TextView
                     android:id="@+id/btnInputs"
                     style="@style/TopButton"
-                    android:text="@string/inputs"
-                    android:drawableStart="@drawable/ic_input"
+                    android:maxWidth="330dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="@string/barcelona_loading"
+                    android:drawableStart="@drawable/ic_fcb_crest"
                     android:nextFocusDown="@+id/grid" />
 
                 <TextView

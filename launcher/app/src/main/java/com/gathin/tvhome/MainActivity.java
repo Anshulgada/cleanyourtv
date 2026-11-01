@@ -80,6 +80,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import java.io.File;
 import java.io.IOException;
 import java.time.LocalDate;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -183,6 +184,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private TextView greeting;
     private View clockBlock;
     private View btnInputs;
+    /** Replaces the visual Inputs pill with a cache-first Barça fixture pill; the remote Input handler remains intact. */
+    private BarcelonaFixtureRepository barcelonaFixtures;
+    private BarcelonaFixture barcelonaFixture;
+    private boolean barcelonaVisible;
+    private final Runnable barcelonaTick = new Runnable() {
+        @Override public void run() {
+            if (!barcelonaVisible) return;
+            renderBarcelonaFixture();
+            root.postDelayed(this, barcelonaFixture != null && barcelonaFixture.kickoffKnown
+                    && java.time.Duration.between(Instant.now(), barcelonaFixture.kickoff).getSeconds() < 3600
+                    ? 1000L : MINUTE_MS);
+        }
+    };
     /** config show_inputs_pill: false keeps the Inputs pill hidden even when the TV has inputs. */
     private boolean showInputsPill = true;
     private TextView btnWifi;
@@ -806,8 +820,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
 
         btnInputs = findViewById(R.id.btnInputs);
+        // Unlike the monochrome system icons, the Barça crest carries its own official colours.
+        Drawable crest = getDrawable(R.drawable.ic_fcb_crest).mutate();
+        crest.clearColorFilter();
+        crest.setTintList(null);
+        int crestSize = Math.round(26 * density);
+        crest.setBounds(0, 0, crestSize, crestSize);
+        ((TextView) btnInputs).setCompoundDrawableTintList(null);
+        // Do not use the "with intrinsic bounds" overload: the downloaded source PNG is 300px wide.
+        ((TextView) btnInputs).setCompoundDrawablesRelative(crest, null, null, null);
         View btnSettings = findViewById(R.id.btnSettings);
-        btnInputs.setOnClickListener(v -> showInputs());
+        btnInputs.setOnClickListener(v -> showBarcelonaFixture());
         btnWifi.setOnClickListener(v -> openNetworkPill());
         btnVpn.setOnClickListener(v -> openVpnPill());
         btnWifi.setOnLongClickListener(v -> {
@@ -871,7 +894,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             else makeIconOnly(btnWifi);
             makeIconOnly((TextView) btnSettings);
         }
-        if (cfg.iconOnlyInputs) makeIconOnly((TextView) btnInputs);
+        // The club crest is already the visual affordance; keeping the text makes the fixture legible at TV distance.
         iconOnlyVpn = vpnPill && cfg.iconOnlyVpn;
         if (iconOnlyVpn) {
             vpnPlainBackground = btnVpn.getBackground().getConstantState();
@@ -916,7 +939,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                         .setDuration(reducedMotion ? Motion.REDUCED_MS : 160).start());
             }
         }
-        if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
+        if (festive) applyFestiveSkin(null, (TextView) btnSettings);
+        barcelonaFixtures = new BarcelonaFixtureRepository(this);
+        updateBarcelonaFixture();
 
         // Hide the glass when focus leaves the tiles.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
@@ -1120,6 +1145,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             updateInputsButton();
             pillsShown = true;
         }
+        barcelonaVisible = true;
+        updateBarcelonaFixture();
         if (showStats) startStats();
         if (gameDay != null) gameDay.start();
         sky.update();
@@ -1303,6 +1330,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ambient.animate().cancel();
         heroArt.animate().cancel();
         handler.removeCallbacks(minuteTick);
+        barcelonaVisible = false;
+        handler.removeCallbacks(barcelonaTick);
         handler.removeCallbacks(openWhenOnline);
         startPending = null;   // leaving Home before the network came back: the boot's app stays closed
         stopStats();
@@ -2549,7 +2578,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ViewGroup bar = findViewById(R.id.topButtons);
         for (int i = 0; i < bar.getChildCount(); i++) {
             View button = bar.getChildAt(i);
-            if (button != btnInputs && button.getVisibility() == View.VISIBLE) return button;
+            if (button.getVisibility() == View.VISIBLE) return button;
         }
         return findViewById(R.id.btnSettings);
     }
@@ -3058,10 +3087,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             ghost.setReducedMotion(reducedMotion);
             pumpkin.setReducedMotion(reducedMotion);
             lamp = pumpkin;
-            setFestiveIcon(inputs, bat);
+            if (inputs != null) setFestiveIcon(inputs, bat);
             setFestiveIcon(btnWifi, pumpkin);
             setFestiveIcon(settings, ghost);
-            addFocusAction(inputs, bat::nudge);
+            if (inputs != null) addFocusAction(inputs, bat::nudge);
             addFocusAction(settings, ghost::nudge);
             return;
         }
@@ -3072,10 +3101,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         marigold.setReducedMotion(reducedMotion);
         diya.setReducedMotion(reducedMotion);
         lamp = diya;
-        setFestiveIcon(inputs, bell);
+        if (inputs != null) setFestiveIcon(inputs, bell);
         setFestiveIcon(btnWifi, diya);
         setFestiveIcon(settings, marigold);
-        addFocusAction(inputs, bell::ring);
+        if (inputs != null) addFocusAction(inputs, bell::ring);
         addFocusAction(settings, marigold::turn);
     }
 
@@ -3192,23 +3221,73 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Hides the Inputs pill when it would have nothing to list: streaming boxes have no HDMI-in, AV or tuner. */
     private void updateInputsButton() {
-        if (!showInputsPill) {
-            btnInputs.setVisibility(View.GONE);
+        // The physical Input remote key still opens showInputs(); this visible slot is now the Barça tracker.
+        btnInputs.setVisibility(topMenu ? View.GONE : View.VISIBLE);
+    }
+
+    private void updateBarcelonaFixture() {
+        if (barcelonaFixtures == null) return;
+        applyBarcelonaFixtures(barcelonaFixtures.cached());
+        if (barcelonaFixtures.isStale()) {
+            barcelonaFixtures.refresh((fixtures, refreshed) -> handler.post(() -> applyBarcelonaFixtures(fixtures)));
+        }
+    }
+
+    private void applyBarcelonaFixtures(List<BarcelonaFixture> fixtures) {
+        barcelonaFixture = BarcelonaFixtureRepository.next(fixtures, Instant.now());
+        renderBarcelonaFixture();
+        if (barcelonaVisible) {
+            handler.removeCallbacks(barcelonaTick);
+            handler.post(barcelonaTick);
+        }
+    }
+
+    private void renderBarcelonaFixture() {
+        if (btnInputs == null) return;
+        if (barcelonaFixture == null) {
+            ((TextView) btnInputs).setText(R.string.barcelona_no_fixture);
+            btnInputs.setContentDescription(getString(R.string.barcelona_no_fixture));
             return;
         }
-        boolean any = liveTvIntent() != null || !sourcePanelService.isEmpty()
-                || (coocaaSources && !CoocaaSources.list(this).isEmpty());
-        TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
-        if (!any && tim != null) {
-            for (TvInputInfo info : tim.getTvInputList()) {
-                // Inputs hidden in Settings > Inputs are left out of the menu, so they don't count here either.
-                if (info.isPassthroughInput() && !info.isHidden(this)) {
-                    any = true;
-                    break;
-                }
-            }
+        String label = barcelonaFixture.compactLabel(Instant.now());
+        ((TextView) btnInputs).setText(label);
+        btnInputs.setContentDescription(label + ". " + barcelonaFixture.competition);
+    }
+
+    /** A focused OK reveals the full fixture without leaving Home or allocating a new screen. */
+    private void showBarcelonaFixture() {
+        if (barcelonaFixture == null) {
+            Toast.makeText(this, R.string.barcelona_no_fixture, Toast.LENGTH_SHORT).show();
+            return;
         }
-        btnInputs.setVisibility(any ? View.VISIBLE : View.GONE);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        int pad = Math.round(18 * density);
+        panel.setPadding(pad, pad, pad, pad);
+        panel.setBackgroundResource(R.drawable.glass_panel);
+        TextView title = new TextView(this);
+        title.setText(getString(R.string.barcelona_details));
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        TextView detail = new TextView(this);
+        String venue = TextUtils.isEmpty(barcelonaFixture.venue) ? "" : "\n" + barcelonaFixture.venue;
+        String countdown = barcelonaFixture.compactLabel(Instant.now()).replace("Barça · ", "");
+        detail.setText("vs " + barcelonaFixture.opponent + "\n" + barcelonaFixture.competition + "\n"
+                + "Kickoff · " + barcelonaFixture.dateAndTimeIst() + "\n"
+                + venue + "\n"
+                + "Countdown · " + countdown);
+        detail.setTextColor(0xD9FFFFFF);
+        detail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        detail.setPadding(0, Math.round(8 * density), 0, 0);
+        panel.addView(title);
+        panel.addView(detail);
+        PopupWindow popup = glassPopup(panel, Math.round(310 * density));
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        popup.setWidth(Math.max(Math.round(270 * density), panel.getMeasuredWidth()));
+        popup.setHeight(panel.getMeasuredHeight());
+        popup.showAsDropDown(btnInputs, 0, Math.round(8 * density));
+        openPopup = popup;
     }
 
     /** boot_to_live_tv, or the Open on start app: the first time Home comes up after the TV starts, open that app

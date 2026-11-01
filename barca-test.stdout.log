@@ -1,0 +1,38 @@
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :app:javaPreCompileRelease UP-TO-DATE
+> Task :app:checkReleaseAarMetadata UP-TO-DATE
+> Task :app:generateReleaseResValues UP-TO-DATE
+> Task :app:mapReleaseSourceSetPaths
+> Task :app:generateReleaseResources
+> Task :app:packageReleaseResources
+> Task :app:createReleaseCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksRelease UP-TO-DATE
+> Task :app:mergeReleaseResources
+> Task :app:parseReleaseLocalResources
+> Task :app:processReleaseMainManifest
+> Task :app:processReleaseManifest
+> Task :app:preReleaseUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileReleaseUnitTest
+> Task :app:processReleaseJavaRes NO-SOURCE
+> Task :app:processReleaseUnitTestJavaRes NO-SOURCE
+> Task :app:processReleaseManifestForPackage
+> Task :app:processReleaseResources
+> Task :app:compileReleaseJavaWithJavac
+> Task :app:bundleReleaseClassesToRuntimeJar
+> Task :app:bundleReleaseClassesToCompileJar
+> Task :app:compileReleaseUnitTestJavaWithJavac
+
+> Task :app:testReleaseUnitTest
+
+BarcelonaFixtureTest > convertsUtcToIstWithoutDeviceTimezone FAILED
+    java.lang.IndexOutOfBoundsException at BarcelonaFixtureTest.java:25
+
+BarcelonaFixtureTest > finalHourUsesCompactCountdown FAILED
+    java.lang.IndexOutOfBoundsException at BarcelonaFixtureTest.java:37
+
+BarcelonaFixtureTest > parsesUpcomingHomeFixtureAndCompetition FAILED
+    java.lang.AssertionError at BarcelonaFixtureTest.java:19
+
+> Task :app:testReleaseUnitTest FAILED
+20 actionable tasks: 15 executed, 5 up-to-date
