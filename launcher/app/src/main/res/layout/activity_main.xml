@@ -343,6 +343,16 @@
                     android:nextFocusDown="@+id/grid" />
 
                 <TextView
+                    android:id="@+id/btnCast"
+                    style="@style/TopButton"
+                    android:maxWidth="210dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="@string/push_to_tv"
+                    android:drawableStart="@drawable/ic_app_logo_nobg"
+                    android:nextFocusDown="@+id/grid" />
+
+                <TextView
                     android:id="@+id/btnWifi"
                     style="@style/TopButton"
                     android:maxWidth="180dp"

@@ -1,6 +1,7 @@
 package com.gathin.tvhome;
 
 import android.animation.ArgbEvaluator;
+import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.Dialog;
@@ -184,6 +185,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private TextView greeting;
     private View clockBlock;
     private View btnInputs;
+    private View btnCast;
+    private PushToTvServer pushToTvServer;
+    private StremioWatchdog stremioWatchdog;
     /** Replaces the visual Inputs pill with a cache-first Barça fixture pill; the remote Input handler remains intact. */
     private BarcelonaFixtureRepository barcelonaFixtures;
     private BarcelonaFixture barcelonaFixture;
@@ -831,6 +835,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ((TextView) btnInputs).setCompoundDrawablesRelative(crest, null, null, null);
         View btnSettings = findViewById(R.id.btnSettings);
         btnInputs.setOnClickListener(v -> showBarcelonaFixture());
+        btnCast = findViewById(R.id.btnCast);
+        if (btnCast != null) {
+            Drawable logo = getDrawable(R.drawable.ic_app_logo_nobg).mutate();
+            logo.clearColorFilter();
+            logo.setTintList(null);
+            int logoSize = Math.round(28 * density);
+            logo.setBounds(0, 0, logoSize, logoSize);
+            ((TextView) btnCast).setCompoundDrawableTintList(null);
+            ((TextView) btnCast).setCompoundDrawablesRelative(logo, null, null, null);
+            btnCast.setOnClickListener(v -> showPushToTvDialog());
+        }
         btnWifi.setOnClickListener(v -> openNetworkPill());
         btnVpn.setOnClickListener(v -> openVpnPill());
         btnWifi.setOnLongClickListener(v -> {
@@ -924,6 +939,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == rightButton;
         };
         btnInputs.setOnKeyListener(pillKeys);
+        if (btnCast != null) btnCast.setOnKeyListener(pillKeys);
         btnWifi.setOnKeyListener(pillKeys);
         btnVpn.setOnKeyListener(pillKeys);
         btnSettings.setOnKeyListener(pillKeys);
@@ -931,7 +947,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         btnLibraryTop.setOnKeyListener(pillKeys);
         for (View button : topAppButtons) button.setOnKeyListener(pillKeys);
         if (advancedEffects) {
-            List<View> pills = new ArrayList<>(Arrays.asList(btnInputs, btnWifi, btnVpn, btnReorder, btnLibraryTop, btnSettings));
+            List<View> pills = new ArrayList<>();
+            pills.add(btnInputs);
+            if (btnCast != null) pills.add(btnCast);
+            pills.addAll(Arrays.asList(btnWifi, btnVpn, btnReorder, btnLibraryTop, btnSettings));
             pills.addAll(topAppButtons);
             for (View button : pills) {
                 button.setOnFocusChangeListener((view, focused) -> view.animate()
@@ -942,6 +961,40 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (festive) applyFestiveSkin(null, (TextView) btnSettings);
         barcelonaFixtures = new BarcelonaFixtureRepository(this);
         updateBarcelonaFixture();
+
+        stremioWatchdog = new StremioWatchdog(this);
+        pushToTvServer = new PushToTvServer(this, new PushToTvServer.PushToTvListener() {
+            @Override
+            public void onOpenUrl(String url, String mode, String title) {
+                openUrlOnTv(url, mode, title);
+            }
+
+            @Override
+            public void onDispatchKey(int keyCode) {
+                dispatchDpadKey(keyCode);
+            }
+
+            @Override
+            public void onTypeText(String text) {
+                Toast.makeText(MainActivity.this, "Remote text: " + text, Toast.LENGTH_SHORT).show();
+            }
+
+            @Override
+            public boolean onHibernateStremio() {
+                return stremioWatchdog != null && stremioWatchdog.hibernateStremio();
+            }
+
+            @Override
+            public boolean isStremioRunning() {
+                return stremioWatchdog != null && stremioWatchdog.isStremioRunning();
+            }
+
+            @Override
+            public long getStremioRemainingSeconds() {
+                return stremioWatchdog != null ? stremioWatchdog.getRemainingSeconds() : 0;
+            }
+        });
+        pushToTvServer.start();
 
         // Hide the glass when focus leaves the tiles.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
@@ -1112,6 +1165,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             recreate();
             return;
         }
+        if (stremioWatchdog != null) stremioWatchdog.onHomeResumed();
         restartIdleClock();
         promptsPaused = false;
         if (grid.getAdapter() == null) grid.setAdapter(adapter);   // dropped by onTrimMemory
@@ -1331,6 +1385,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         heroArt.animate().cancel();
         handler.removeCallbacks(minuteTick);
         barcelonaVisible = false;
+        if (stremioWatchdog != null) stremioWatchdog.onHomePaused();
         handler.removeCallbacks(barcelonaTick);
         handler.removeCallbacks(openWhenOnline);
         startPending = null;   // leaving Home before the network came back: the boot's app stays closed
@@ -1395,6 +1450,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         RemoteKeys.release(this);
         cancelHoldOk();
         if (gameDay != null) gameDay.shutdown();
+        if (pushToTvServer != null) pushToTvServer.stop();
+        if (stremioWatchdog != null) stremioWatchdog.cancelTimer();
         unregisterReceiver(packageReceiver);
         if (openOnStartOnWake) unregisterReceiver(wakeReceiver);
         wallpaperPlayer.close();
@@ -3288,6 +3345,272 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         popup.setHeight(panel.getMeasuredHeight());
         popup.showAsDropDown(btnInputs, 0, Math.round(8 * density));
         openPopup = popup;
+    }
+
+    private View createGlowingDot(boolean isActive, boolean isPulsing) {
+        FrameLayout container = new FrameLayout(this);
+        int containerSize = Math.round(18 * density);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(containerSize, containerSize);
+        lp.gravity = Gravity.CENTER_VERTICAL;
+        lp.setMarginEnd(Math.round(8 * density));
+        container.setLayoutParams(lp);
+
+        int coreColor = isActive ? 0xFF00E676 : 0xFFFF3B30;
+        int haloColor = isActive ? 0x4D00E676 : 0x4DFF3B30;
+
+        View halo = new View(this);
+        FrameLayout.LayoutParams haloLp = new FrameLayout.LayoutParams(containerSize, containerSize);
+        haloLp.gravity = Gravity.CENTER;
+        halo.setLayoutParams(haloLp);
+        GradientDrawable haloDrawable = new GradientDrawable();
+        haloDrawable.setShape(GradientDrawable.OVAL);
+        haloDrawable.setColor(haloColor);
+        halo.setBackground(haloDrawable);
+        container.addView(halo);
+
+        View core = new View(this);
+        int coreSize = Math.round(8 * density);
+        FrameLayout.LayoutParams coreLp = new FrameLayout.LayoutParams(coreSize, coreSize);
+        coreLp.gravity = Gravity.CENTER;
+        core.setLayoutParams(coreLp);
+        GradientDrawable coreDrawable = new GradientDrawable();
+        coreDrawable.setShape(GradientDrawable.OVAL);
+        coreDrawable.setColor(coreColor);
+        core.setBackground(coreDrawable);
+        container.addView(core);
+
+        if (isPulsing) {
+            ObjectAnimator scaleX = ObjectAnimator.ofFloat(halo, "scaleX", 0.75f, 1.25f);
+            ObjectAnimator scaleY = ObjectAnimator.ofFloat(halo, "scaleY", 0.75f, 1.25f);
+            ObjectAnimator alpha = ObjectAnimator.ofFloat(halo, "alpha", 0.35f, 0.95f);
+            scaleX.setDuration(1200);
+            scaleX.setRepeatCount(ValueAnimator.INFINITE);
+            scaleX.setRepeatMode(ValueAnimator.REVERSE);
+            scaleY.setDuration(1200);
+            scaleY.setRepeatCount(ValueAnimator.INFINITE);
+            scaleY.setRepeatMode(ValueAnimator.REVERSE);
+            alpha.setDuration(1200);
+            alpha.setRepeatCount(ValueAnimator.INFINITE);
+            alpha.setRepeatMode(ValueAnimator.REVERSE);
+            scaleX.start();
+            scaleY.start();
+            alpha.start();
+        } else {
+            halo.setAlpha(0.35f);
+        }
+
+        return container;
+    }
+
+    private LinearLayout createStatusRow(String title, String statusText, boolean isActive, boolean isPulsing) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, Math.round(5 * density), 0, Math.round(5 * density));
+
+        TextView tvTitle = new TextView(this);
+        tvTitle.setText(title);
+        tvTitle.setTextColor(0xD9FFFFFF);
+        tvTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        LinearLayout.LayoutParams lpTitle = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
+        row.addView(tvTitle, lpTitle);
+
+        View dot = createGlowingDot(isActive, isPulsing);
+        row.addView(dot);
+
+        TextView tvStatus = new TextView(this);
+        tvStatus.setText(statusText);
+        tvStatus.setTextColor(isActive ? 0xFF00E676 : 0xFF8E8E93);
+        tvStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tvStatus.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        row.addView(tvStatus);
+
+        return row;
+    }
+
+    private void showPushToTvDialog() {
+        if (btnCast == null) return;
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        int pad = Math.round(20 * density);
+        panel.setPadding(pad, pad, pad, pad);
+        panel.setBackgroundResource(R.drawable.glass_panel);
+
+        // Header with No-BG Logo + Title
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(0, 0, 0, Math.round(8 * density));
+
+        ImageView logoView = new ImageView(this);
+        logoView.setImageResource(R.drawable.ic_app_logo_nobg);
+        int logoSize = Math.round(34 * density);
+        LinearLayout.LayoutParams lpLogo = new LinearLayout.LayoutParams(logoSize, logoSize);
+        lpLogo.setMarginEnd(Math.round(10 * density));
+        header.addView(logoView, lpLogo);
+
+        TextView title = new TextView(this);
+        title.setText(R.string.push_to_tv_title);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        header.addView(title);
+        panel.addView(header);
+
+        String ip = pushToTvServer != null ? pushToTvServer.getDeviceIp() : "192.168.1.5";
+        String url = "http://" + ip + ":" + PushToTvServer.PORT;
+
+        // Centered QR Code Card: MARGIN=0 in generator makes modules take full space with tight 5dp padding
+        int qrSize = Math.round(180 * density);
+        Bitmap qr = QrCodeGenerator.generateQrBitmap(url, qrSize, qrSize);
+        if (qr != null) {
+            FrameLayout qrCard = new FrameLayout(this);
+            int padQr = Math.round(5 * density);
+            qrCard.setPadding(padQr, padQr, padQr, padQr);
+            GradientDrawable qrBg = new GradientDrawable();
+            qrBg.setColor(Color.WHITE);
+            qrBg.setCornerRadius(Math.round(8 * density));
+            qrCard.setBackground(qrBg);
+
+            ImageView qrView = new ImageView(this);
+            qrView.setImageBitmap(qr);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(qrSize, qrSize);
+            qrView.setLayoutParams(lp);
+            qrCard.addView(qrView);
+
+            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cardLp.gravity = Gravity.CENTER_HORIZONTAL;
+            cardLp.topMargin = Math.round(6 * density);
+            cardLp.bottomMargin = Math.round(10 * density);
+            panel.addView(qrCard, cardLp);
+        }
+
+        // Subtitle Instructions
+        TextView sub = new TextView(this);
+        sub.setText("Scan QR or visit: " + url + "\n(Local mDNS: http://tcl-tv.local:8080)");
+        sub.setTextColor(0xB3FFFFFF);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        sub.setGravity(Gravity.CENTER_HORIZONTAL);
+        sub.setPadding(0, 0, 0, Math.round(14 * density));
+        panel.addView(sub);
+
+        // Status Card Box
+        LinearLayout statusBox = new LinearLayout(this);
+        statusBox.setOrientation(LinearLayout.VERTICAL);
+        int boxPad = Math.round(12 * density);
+        statusBox.setPadding(boxPad, boxPad, boxPad, boxPad);
+        GradientDrawable boxBg = new GradientDrawable();
+        boxBg.setColor(0x22FFFFFF);
+        boxBg.setCornerRadius(Math.round(12 * density));
+        boxBg.setStroke(1, 0x1FFFFFFF);
+        statusBox.setBackground(boxBg);
+
+        // Row 1: TV Bro Browser Status
+        boolean tvBroInstalled = pushToTvServer != null && pushToTvServer.isTvBroInstalled();
+        statusBox.addView(createStatusRow("TV Bro (Ad-Block)",
+                tvBroInstalled ? "Ready" : "Not Installed",
+                tvBroInstalled,
+                tvBroInstalled));
+
+        // Thin subtle divider
+        View div = new View(this);
+        div.setBackgroundColor(0x18FFFFFF);
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
+        divLp.topMargin = Math.round(6 * density);
+        divLp.bottomMargin = Math.round(6 * density);
+        statusBox.addView(div, divLp);
+
+        // Row 2: Stremio Watchdog Status
+        boolean stremioRunning = stremioWatchdog != null && stremioWatchdog.isStremioRunning();
+        String stremioStatusText;
+        if (stremioRunning) {
+            long remainingMin = Math.max(1, stremioWatchdog.getRemainingSeconds() / 60);
+            stremioStatusText = "Active (~" + remainingMin + "m auto-hibernate)";
+        } else {
+            stremioStatusText = "Idle (RAM Reclaimed)";
+        }
+        statusBox.addView(createStatusRow("Stremio Watchdog", stremioStatusText, stremioRunning, stremioRunning));
+        panel.addView(statusBox);
+
+        // Quick RAM Reclamation Button if Stremio is currently running
+        if (stremioRunning) {
+            TextView btnHibernate = new TextView(this);
+            btnHibernate.setText("⚡ Free Stremio RAM Now (~160MB)");
+            btnHibernate.setBackgroundResource(R.drawable.pill_bg);
+            btnHibernate.setTextColor(Color.WHITE);
+            btnHibernate.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            btnHibernate.setGravity(Gravity.CENTER);
+            btnHibernate.setFocusable(true);
+            btnHibernate.setClickable(true);
+            int bPadH = Math.round(16 * density);
+            int bPadV = Math.round(10 * density);
+            btnHibernate.setPadding(bPadH, bPadV, bPadH, bPadV);
+            LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            btnLp.topMargin = Math.round(12 * density);
+            btnHibernate.setLayoutParams(btnLp);
+            btnHibernate.setOnClickListener(v -> {
+                if (stremioWatchdog != null) {
+                    stremioWatchdog.hibernateStremio();
+                    Toast.makeText(this, R.string.stremio_reclaimed_toast, Toast.LENGTH_SHORT).show();
+                    if (openPopup != null) openPopup.dismiss();
+                }
+            });
+            panel.addView(btnHibernate);
+        }
+
+        int modalWidth = Math.round(380 * density);
+        PopupWindow popup = glassPopup(panel, modalWidth);
+        popup.setHeight(ViewGroup.LayoutParams.WRAP_CONTENT);
+        popup.showAsDropDown(btnCast, 0, Math.round(8 * density));
+        openPopup = popup;
+    }
+
+    public void openUrlOnTv(String url, String mode, String title) {
+        if (url == null || url.trim().isEmpty()) return;
+        url = url.trim();
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            url = "https://" + url;
+        }
+        Uri uri = Uri.parse(url);
+        try {
+            if ("direct".equalsIgnoreCase(mode) || url.endsWith(".m3u8") || url.endsWith(".mp4")) {
+                Intent videoIntent = new Intent(Intent.ACTION_VIEW);
+                videoIntent.setDataAndType(uri, "video/*");
+                videoIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try {
+                    startActivity(videoIntent);
+                    Toast.makeText(this, "Playing stream: " + (title.isEmpty() ? url : title), Toast.LENGTH_SHORT).show();
+                    return;
+                } catch (Exception ignored) {
+                    // Fall back to TV Bro
+                }
+            }
+
+            Intent browserIntent = new Intent(Intent.ACTION_VIEW, uri);
+            browserIntent.setPackage("com.phlox.tvwebbrowser");
+            browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(browserIntent);
+            Toast.makeText(this, "Opening in TV Bro: " + (title.isEmpty() ? url : title), Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            try {
+                Intent fallback = new Intent(Intent.ACTION_VIEW, uri);
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(fallback);
+            } catch (Exception ex) {
+                Toast.makeText(this, "Unable to open link: " + ex.getMessage(), Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    public void dispatchDpadKey(int keyCode) {
+        try {
+            dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, keyCode));
+            dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, keyCode));
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "Key dispatch failed: " + e.getMessage());
+        }
     }
 
     /** boot_to_live_tv, or the Open on start app: the first time Home comes up after the TV starts, open that app
