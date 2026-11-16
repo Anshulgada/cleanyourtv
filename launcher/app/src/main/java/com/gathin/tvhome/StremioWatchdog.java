@@ -37,6 +37,7 @@ public final class StremioWatchdog {
     }
 
     public synchronized void onHomeResumed() {
+        MediaShelfManager.snapshotStremioState(context);
         if (isStremioRunning()) {
             if (!timerRunning) {
                 stremioDetectedAt = System.currentTimeMillis();
@@ -80,6 +81,7 @@ public final class StremioWatchdog {
 
     public synchronized boolean hibernateStremio() {
         try {
+            MediaShelfManager.snapshotStremioState(context);
             ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
             if (am != null) {
                 am.killBackgroundProcesses(PACKAGE_STREMIO);

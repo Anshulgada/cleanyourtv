@@ -20,6 +20,12 @@ public class InputKeyService extends AccessibilityService {
 
     private static final String ACTION_VIEW_INPUTS = "com.android.tv.action.VIEW_INPUTS";
 
+    private static volatile InputKeyService running;
+
+    public static InputKeyService getRunning() {
+        return running;
+    }
+
     private int[] inputKeycodes = new int[0];
     private Map<Integer, String> appKeys = Collections.emptyMap();
     private Map<Integer, String> appScancodes = Collections.emptyMap();
@@ -35,6 +41,7 @@ public class InputKeyService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        running = this;
         // From config.xml or a theme's config.json; theme.sh rebinds this service after a push.
         Config config = Config.load(this);
         // restore_key_services: note that this helper runs, so Home can put it back after a force stop.
@@ -62,6 +69,16 @@ public class InputKeyService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
+                || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    if (performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)) return true;
+                }
+                performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+            }
+            return true;
+        }
         if (consumeVolumeKeys && VolumeKeys.handle(this, event)) return true;
         // A scancode entry is more specific than any keycode, so it goes first.
         if (RemoteKeys.handle(this, event, appScancodes.get(event.getScanCode()),
@@ -81,6 +98,7 @@ public class InputKeyService extends AccessibilityService {
     /** Unbound by Android: the user turned the helper off, so Home doesn't put it back (ServiceRepair). */
     @Override
     public boolean onUnbind(Intent intent) {
+        if (running == this) running = null;
         RemoteKeys.release(this);
         if (repairRecord) ServiceRepair.disconnected(this, getClass());
         return super.onUnbind(intent);

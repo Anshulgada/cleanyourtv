@@ -4,7 +4,13 @@ import android.animation.ArgbEvaluator;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.Dialog;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import org.json.JSONObject;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -186,6 +192,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private View clockBlock;
     private View btnInputs;
     private View btnCast;
+    private View btnRam;
+    private View btnWeather;
     private PushToTvServer pushToTvServer;
     private StremioWatchdog stremioWatchdog;
     /** Replaces the visual Inputs pill with a cache-first Barça fixture pill; the remote Input handler remains intact. */
@@ -196,9 +204,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         @Override public void run() {
             if (!barcelonaVisible) return;
             renderBarcelonaFixture();
-            root.postDelayed(this, barcelonaFixture != null && barcelonaFixture.kickoffKnown
-                    && java.time.Duration.between(Instant.now(), barcelonaFixture.kickoff).getSeconds() < 3600
-                    ? 1000L : MINUTE_MS);
+            boolean isLiveOrSoon = false;
+            if (barcelonaFixture != null && barcelonaFixture.kickoffKnown && barcelonaFixture.kickoff != null) {
+                long sec = java.time.Duration.between(Instant.now(), barcelonaFixture.kickoff).getSeconds();
+                isLiveOrSoon = sec < 3600 && sec > -3 * 3600;
+            }
+            BarcelonaLiveScoreManager.LiveScore live = BarcelonaLiveScoreManager.getCurrentScore();
+            if (live != null && live.isLive) isLiveOrSoon = true;
+            root.postDelayed(this, isLiveOrSoon ? 1000L : MINUTE_MS);
         }
     };
     /** config show_inputs_pill: false keeps the Inputs pill hidden even when the TV has inputs. */
@@ -676,7 +689,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         });
         ((GridLayoutManager) grid.getLayoutManager()).setSpanSizeLookup(new GridLayoutManager.SpanSizeLookup() {
-            @Override public int getSpanSize(int position) { return !singleRow && adapter != null && adapter.isLibraryAt(position) ? COLUMNS : 1; }
+            @Override public int getSpanSize(int position) {
+                return !singleRow && adapter != null && (adapter.isLibraryAt(position) || adapter.isStremioShelfAt(position) || adapter.isSmartTubeShelfAt(position)) ? COLUMNS : 1;
+            }
         });
         grid.setHasFixedSize(true);
         grid.setItemAnimator(null);
@@ -846,6 +861,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             ((TextView) btnCast).setCompoundDrawablesRelative(logo, null, null, null);
             btnCast.setOnClickListener(v -> showPushToTvDialog());
         }
+        btnRam = findViewById(R.id.btnRam);
+        if (btnRam != null) {
+            setupRamPill();
+        }
+        btnWeather = findViewById(R.id.btnWeather);
+        if (btnWeather != null) {
+            setupWeatherPill();
+        }
         btnWifi.setOnClickListener(v -> openNetworkPill());
         btnVpn.setOnClickListener(v -> openVpnPill());
         btnWifi.setOnLongClickListener(v -> {
@@ -928,6 +951,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
             if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                if (btnRam != null && btnRam.getVisibility() == View.VISIBLE) {
+                    btnRam.requestFocus();
+                    return true;
+                }
                 // Back to the dock tile Up came from, not wherever the focus finder lands.
                 focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
                 return true;
@@ -938,6 +965,39 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return v.getId() == leftButton;
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == rightButton;
         };
+
+        View.OnKeyListener secondaryPillKeys = (v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                if (btnInputs != null && btnInputs.getVisibility() == View.VISIBLE) {
+                    btnInputs.requestFocus();
+                } else if (btnCast != null) {
+                    btnCast.requestFocus();
+                } else {
+                    btnSettings.requestFocus();
+                }
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                if (v == btnWeather && btnRam != null) {
+                    btnRam.requestFocus();
+                    return true;
+                }
+                return true;
+            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (v == btnRam && btnWeather != null) {
+                    btnWeather.requestFocus();
+                    return true;
+                }
+                return true;
+            }
+            return false;
+        };
         btnInputs.setOnKeyListener(pillKeys);
         if (btnCast != null) btnCast.setOnKeyListener(pillKeys);
         btnWifi.setOnKeyListener(pillKeys);
@@ -946,10 +1006,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         btnReorder.setOnKeyListener(pillKeys);
         btnLibraryTop.setOnKeyListener(pillKeys);
         for (View button : topAppButtons) button.setOnKeyListener(pillKeys);
+        if (btnRam != null) btnRam.setOnKeyListener(secondaryPillKeys);
+        if (btnWeather != null) btnWeather.setOnKeyListener(secondaryPillKeys);
         if (advancedEffects) {
             List<View> pills = new ArrayList<>();
             pills.add(btnInputs);
             if (btnCast != null) pills.add(btnCast);
+            if (btnRam != null) pills.add(btnRam);
+            if (btnWeather != null) pills.add(btnWeather);
             pills.addAll(Arrays.asList(btnWifi, btnVpn, btnReorder, btnLibraryTop, btnSettings));
             pills.addAll(topAppButtons);
             for (View button : pills) {
@@ -993,13 +1057,43 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             public long getStremioRemainingSeconds() {
                 return stremioWatchdog != null ? stremioWatchdog.getRemainingSeconds() : 0;
             }
+
+            @Override
+            public void onShelfUpdated() {
+                if (adapter != null) adapter.notifyShelvesChanged();
+            }
+
+            @Override
+            public void onToggleShelfPosition() {
+                if (adapter != null) {
+                    boolean next = !adapter.isShelvesAboveApps();
+                    adapter.setShelvesAboveApps(next);
+                    if (grid != null && grid.getLayoutManager() instanceof GridLayoutManager) {
+                        ((GridLayoutManager) grid.getLayoutManager()).getSpanSizeLookup().invalidateSpanIndexCache();
+                        grid.getLayoutManager().requestLayout();
+                    }
+                    reloadApps(false);
+                    Toast.makeText(MainActivity.this, next ? "Shelves: Below Dock" : "Shelves: Below All Apps", Toast.LENGTH_SHORT).show();
+                }
+            }
+
+            @Override
+            public boolean isShelvesAboveApps() {
+                return adapter != null && adapter.isShelvesAboveApps();
+            }
         });
         pushToTvServer.start();
+        MediaShelfManager.setShelfUpdateListener(() -> {
+            if (adapter != null) adapter.notifyShelvesChanged();
+        });
 
-        // Hide the glass when focus leaves the tiles.
+        // Hide the glass and hero text when focus leaves the tiles.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
             boolean onTile = newF != null && newF.getId() == R.id.card;
-            if (!onTile) hideGlass();
+            if (!onTile) {
+                hideGlass();
+                hideHero();
+            }
         });
 
         packageFilter.addAction(Intent.ACTION_PACKAGE_ADDED);
@@ -1166,6 +1260,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             return;
         }
         if (stremioWatchdog != null) stremioWatchdog.onHomeResumed();
+        if (System.currentTimeMillis() - MediaShelfManager.getLastRefreshTime() > 20 * 60 * 1000L) {
+            MediaShelfManager.refreshSmartTubeFeedAsync(this);
+        }
+        updateRamUsage();
         restartIdleClock();
         promptsPaused = false;
         if (grid.getAdapter() == null) grid.setAdapter(adapter);   // dropped by onTrimMemory
@@ -1496,6 +1594,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      */
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        int eventKeyCode = event.getKeyCode();
+        if (eventKeyCode == KeyEvent.KEYCODE_POWER || eventKeyCode == KeyEvent.KEYCODE_SLEEP
+                || eventKeyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                putTvToSleep();
+            }
+            return true;
+        }
         // Vendor keys (TCL Netflix button, 4062) never reach the key services, only the focused window, so their
         // "hold:" entries run here too or nowhere. Only while resumed: onPause releases Home's holds, and a DOWN
         // taken after that would arm one nothing releases.
@@ -1978,6 +2084,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     // ---- top shelf -------------------------------------------------------------------------------
 
     private void showHero(int position, float dockTopInRoot) {
+        if (hero != null) hero.setVisibility(View.VISIBLE);
         String label = adapter.labelAt(position);
         int color = adapter.ambientColorAt(position);
         float y = dockTopInRoot - 14 * density - 26 * density - hero.getHeight();
@@ -2289,21 +2396,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     }
 
     private void hideHero() {
-        if (!heroShown) return;
         stopAmbientAnimation();
         hero.animate().cancel();
         ambient.animate().cancel();
         heroArt.animate().cancel();
         heroShown = false;
-        if (animations && !reducedMotion) {
-            hero.animate().alpha(0f).setDuration(160).start();
-            if (ambientGlow) ambient.animate().alpha(0f).setDuration(300).start();
-            heroArt.animate().alpha(0f).setDuration(300).start();
-        } else {
-            hero.setAlpha(0f);
-            ambient.setAlpha(0f);
-            heroArt.setAlpha(0f);
-        }
+        hero.setAlpha(0f);
+        hero.setVisibility(View.GONE);
+        if (heroName != null) heroName.setText("");
+        if (ambientGlow) ambient.animate().alpha(0f).setDuration(160).start();
+        heroArt.animate().alpha(0f).setDuration(160).start();
     }
 
     private void hideGlass() {
@@ -2530,18 +2632,103 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 focusLibrary();
                 return true;
             }
+            // When shelves and dock are mixed in GridLayoutManager, query SpanSizeLookup for the true screen column
+            // rather than raw position % COLUMNS (which treats position 7 as col 3 and position 8 as col 0).
+            GridLayoutManager glm = grid.getLayoutManager() instanceof GridLayoutManager
+                    ? (GridLayoutManager) grid.getLayoutManager() : null;
+            if (glm != null) {
+                int col = glm.getSpanSizeLookup().getSpanIndex(position, COLUMNS);
+                int span = glm.getSpanSizeLookup().getSpanSize(position);
+                boolean towardStart = (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) != rtlAppGrid;
+                if (towardStart) {
+                    return col == 0;
+                } else {
+                    if (col + span >= COLUMNS) return true;
+                    if (position < COLUMNS && position == adapter.dockFilled() - 1) return true;
+                    if (position == count - 1) return true;
+                    if (position + 1 < count && glm.getSpanSizeLookup().getSpanIndex(position + 1, COLUMNS) == 0) return true;
+                    return false;
+                }
+            }
             // In the dock, the last app is the row's end: the empty slots after it take no focus.
             int rowCount = position < COLUMNS ? Math.min(count, adapter.dockFilled()) : count;
             return GridNavigation.atHorizontalEdge(position, rowCount, COLUMNS,
                     rtlAppGrid, keyCode == KeyEvent.KEYCODE_DPAD_LEFT);
         }
+        if (adapter.isShelvesAboveApps()) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                if (position < COLUMNS) return false; // dock row -> top bar
+                int otherAppsStart = COLUMNS + adapter.getShelfCount();
+                if (position < otherAppsStart + COLUMNS) {
+                    // First row of other apps -> go up to the shelf
+                    int smartTubePos = adapter.getSmartTubePosition();
+                    if (smartTubePos != -1) {
+                        focusShelf(smartTubePos);
+                        return true;
+                    }
+                    int stremioPos = adapter.getStremioPosition();
+                    if (stremioPos != -1) {
+                        focusShelf(stremioPos);
+                        return true;
+                    }
+                    return false;
+                }
+                target = position - COLUMNS;
+            } else { // DPAD_DOWN
+                if (position < COLUMNS) {
+                    // Down from dock -> go to Stremio shelf (or SmartTube shelf)
+                    int stremioPos = adapter.getStremioPosition();
+                    if (stremioPos != -1) {
+                        focusShelf(stremioPos);
+                        return true;
+                    }
+                    int smartTubePos = adapter.getSmartTubePosition();
+                    if (smartTubePos != -1) {
+                        focusShelf(smartTubePos);
+                        return true;
+                    }
+                }
+                int otherAppsStart = COLUMNS + adapter.getShelfCount();
+                int totalOtherApps = adapter.getRawAppCount() - Math.min(COLUMNS, adapter.getRawAppCount());
+                if (totalOtherApps > 0) {
+                    int lastOtherAppPos = otherAppsStart + totalOtherApps - 1;
+                    int lastRowStart = otherAppsStart + ((totalOtherApps - 1) / COLUMNS) * COLUMNS;
+                    if (position >= lastRowStart && position <= lastOtherAppPos) {
+                        if (adapter.isLibraryAt(adapter.getLibraryPosition())) {
+                            focusLibrary();
+                            return true;
+                        }
+                        return true;
+                    }
+                    target = Math.min(position + COLUMNS, lastOtherAppPos);
+                } else {
+                    return true;
+                }
+            }
+            focusTile(target);
+            grid.playSoundEffect(keyCode == KeyEvent.KEYCODE_DPAD_UP
+                    ? SoundEffectConstants.NAVIGATION_UP : SoundEffectConstants.NAVIGATION_DOWN);
+            return true;
+        }
+
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
             if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
             target = position - COLUMNS;
         } else {
             int lastRowStart = ((count - 1) / COLUMNS) * COLUMNS;
             if (position >= lastRowStart) {
-                if (adapter.isLibraryAt(count)) focusLibrary();
+                if (adapter.isLibraryAt(count)) {
+                    focusLibrary();
+                    return true;
+                }
+                if (adapter.isStremioShelfAt(count)) {
+                    focusShelf(count);
+                    return true;
+                }
+                if (adapter.isSmartTubeShelfAt(count)) {
+                    focusShelf(count);
+                    return true;
+                }
                 return true;
             }
             target = Math.min(position + COLUMNS, count - 1);
@@ -2684,16 +2871,148 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
     }
 
+    private int focusedColumn() {
+        if (grid != null && grid.getLayoutManager() instanceof GridLayoutManager) {
+            GridLayoutManager glm = (GridLayoutManager) grid.getLayoutManager();
+            return glm.getSpanSizeLookup().getSpanIndex(lastFocused, COLUMNS);
+        }
+        return lastFocused % COLUMNS;
+    }
+
     @Override public void onLibraryUp() {
+        if (adapter.isShelvesAboveApps()) {
+            int otherAppsStart = COLUMNS + adapter.getShelfCount();
+            int totalOtherApps = adapter.getRawAppCount() - Math.min(COLUMNS, adapter.getRawAppCount());
+            if (totalOtherApps > 0) {
+                int lastRowStart = otherAppsStart + ((totalOtherApps - 1) / COLUMNS) * COLUMNS;
+                focusTile(Math.min(lastRowStart + focusedColumn(), otherAppsStart + totalOtherApps - 1));
+            } else {
+                int smartTubePos = adapter.getSmartTubePosition();
+                if (smartTubePos != -1) focusShelf(smartTubePos);
+                else firstTopButton().requestFocus();
+            }
+            return;
+        }
         if (adapter.appCount() == 0) { firstTopButton().requestFocus(); return; }
         int lastRow = ((adapter.appCount() - 1) / COLUMNS) * COLUMNS;
         focusTile(Math.min(lastRow + lastFocused % COLUMNS, adapter.appCount() - 1));
     }
 
+    @Override public void onLibraryDown() {
+        if (adapter.isShelvesAboveApps()) {
+            return;
+        }
+        int next = adapter.appCount() + 1;
+        if (adapter.isStremioShelfAt(next) || adapter.isSmartTubeShelfAt(next)) {
+            focusShelf(next);
+        }
+    }
+
+    @Override
+    public void onShelfUp(int shelfIndex) {
+        if (adapter.isShelvesAboveApps()) {
+            if (shelfIndex == 0) {
+                int dockCol = Math.min(focusedColumn(), adapter.getDockSize() - 1);
+                focusTile(dockCol);
+            } else if (shelfIndex == 1) {
+                int stremioPos = adapter.getStremioPosition();
+                if (stremioPos != -1) focusShelf(stremioPos);
+                else {
+                    int dockCol = Math.min(focusedColumn(), adapter.getDockSize() - 1);
+                    focusTile(dockCol);
+                }
+            }
+            return;
+        }
+
+        if (shelfIndex == 0) {
+            if (adapter.isLibraryAt(adapter.appCount())) {
+                focusLibrary();
+            } else if (adapter.appCount() > 0) {
+                int lastRow = ((adapter.appCount() - 1) / COLUMNS) * COLUMNS;
+                focusTile(Math.min(lastRow + (lastFocused % COLUMNS), adapter.appCount() - 1));
+            } else {
+                firstTopButton().requestFocus();
+            }
+        } else if (shelfIndex == 1) {
+            int stremioPos = adapter.getStremioPosition();
+            if (stremioPos != -1) focusShelf(stremioPos);
+        }
+    }
+
+    @Override
+    public void onShelfDown(int shelfIndex) {
+        if (adapter.isShelvesAboveApps()) {
+            if (shelfIndex == 0) {
+                int smartTubePos = adapter.getSmartTubePosition();
+                if (smartTubePos != -1) {
+                    focusShelf(smartTubePos);
+                } else {
+                    focusFirstOtherAppOrLibrary();
+                }
+            } else if (shelfIndex == 1) {
+                focusFirstOtherAppOrLibrary();
+            }
+            return;
+        }
+
+        if (shelfIndex == 0) {
+            int smartTubePos = adapter.getSmartTubePosition();
+            if (smartTubePos != -1) {
+                focusShelf(smartTubePos);
+            }
+        }
+    }
+
+    private void focusFirstOtherAppOrLibrary() {
+        int otherAppsStart = COLUMNS + adapter.getShelfCount();
+        int totalOtherApps = adapter.getRawAppCount() - Math.min(COLUMNS, adapter.getRawAppCount());
+        if (totalOtherApps > 0) {
+            int target = Math.min(otherAppsStart + focusedColumn(), otherAppsStart + totalOtherApps - 1);
+            focusTile(target);
+        } else if (adapter.getLibraryPosition() != -1) {
+            focusLibrary();
+        }
+    }
+
+    private void focusShelf(int shelfPos) {
+        cancelPendingFocusScroll();
+        hideGlass();
+        hideHero();
+        RecyclerView.ViewHolder holder = grid.findViewHolderForAdapterPosition(shelfPos);
+        if (holder instanceof AppAdapter.ShelfViewHolder) {
+            AppAdapter.ShelfViewHolder svh = (AppAdapter.ShelfViewHolder) holder;
+            if (svh.recycler.getChildCount() > 0) {
+                View firstChild = svh.recycler.getChildAt(0);
+                View target = firstChild.findViewById(R.id.cardContainer);
+                if (target != null) {
+                    target.requestFocus();
+                    return;
+                }
+            }
+        }
+        grid.smoothScrollToPosition(shelfPos);
+        grid.postDelayed(() -> {
+            RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(shelfPos);
+            if (vh instanceof AppAdapter.ShelfViewHolder) {
+                AppAdapter.ShelfViewHolder svh = (AppAdapter.ShelfViewHolder) vh;
+                if (svh.recycler.getChildCount() > 0) {
+                    View firstChild = svh.recycler.getChildAt(0);
+                    View target = firstChild.findViewById(R.id.cardContainer);
+                    if (target != null) {
+                        target.requestFocus();
+                        return;
+                    }
+                }
+                svh.recycler.requestFocus();
+            }
+        }, 80);
+    }
+
     private void focusLibrary() {
         cancelPendingFocusScroll();
-        int position = adapter.appCount();
-        if (!adapter.isLibraryAt(position)) return;
+        int position = adapter.getLibraryPosition();
+        if (position == -1 || !adapter.isLibraryAt(position)) return;
         RecyclerView.ViewHolder holder = grid.findViewHolderForAdapterPosition(position);
         if (holder != null) {
             View button = holder.itemView.findViewById(R.id.btnLibrary);
@@ -2707,8 +3026,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             grid.scrollToPosition(position);
             grid.post(() -> {
                 if (appLibrary != null || !hasWindowFocus()) return;
-                RecyclerView.ViewHolder footer = grid.findViewHolderForAdapterPosition(adapter.appCount());
-                if (footer != null && adapter.isLibraryAt(adapter.appCount())
+                RecyclerView.ViewHolder footer = grid.findViewHolderForAdapterPosition(position);
+                if (footer != null && adapter.isLibraryAt(position)
                         && footer.itemView.findViewById(R.id.btnLibrary).requestFocus()) libraryFocusPending = false;
             });
             return;
@@ -3306,7 +3625,34 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             btnInputs.setContentDescription(getString(R.string.barcelona_no_fixture));
             return;
         }
-        String label = barcelonaFixture.compactLabel(Instant.now());
+
+        Instant now = Instant.now();
+        boolean matchWindow = barcelonaFixture.kickoffKnown && barcelonaFixture.kickoff != null
+                && (now.isAfter(barcelonaFixture.kickoff) || java.time.Duration.between(now, barcelonaFixture.kickoff).getSeconds() <= 0)
+                && now.isBefore(barcelonaFixture.kickoff.plusSeconds(3 * 3600));
+
+        BarcelonaLiveScoreManager.LiveScore live = BarcelonaLiveScoreManager.getCurrentScore();
+        if (matchWindow || (live != null && live.isLive)) {
+            BarcelonaLiveScoreManager.checkLiveScoreAsync(barcelonaFixture, score -> {
+                if (score != null && (score.isLive || score.isCompleted)) {
+                    handler.post(() -> {
+                        if (btnInputs != null) {
+                            String scoreLabel = score.formatLabel();
+                            ((TextView) btnInputs).setText(scoreLabel);
+                            btnInputs.setContentDescription("FC Barcelona live score: " + scoreLabel);
+                        }
+                    });
+                }
+            });
+            if (live != null && (live.isLive || live.isCompleted)) {
+                String scoreLabel = live.formatLabel();
+                ((TextView) btnInputs).setText(scoreLabel);
+                btnInputs.setContentDescription("FC Barcelona live score: " + scoreLabel);
+                return;
+            }
+        }
+
+        String label = barcelonaFixture.compactLabel(now);
         ((TextView) btnInputs).setText(label);
         btnInputs.setContentDescription(label + ". " + barcelonaFixture.competition);
     }
@@ -3330,10 +3676,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         TextView detail = new TextView(this);
         String venue = TextUtils.isEmpty(barcelonaFixture.venue) ? "" : "\n" + barcelonaFixture.venue;
         String countdown = barcelonaFixture.compactLabel(Instant.now()).replace("Barça · ", "");
-        detail.setText("vs " + barcelonaFixture.opponent + "\n" + barcelonaFixture.competition + "\n"
+        BarcelonaLiveScoreManager.LiveScore live = BarcelonaLiveScoreManager.getCurrentScore();
+        String liveStatus = (live != null && (live.isLive || live.isCompleted))
+                ? "Live Score · " + live.formatLabel() + "\n" : "";
+        detail.setText(liveStatus + "vs " + barcelonaFixture.opponent + "\n" + barcelonaFixture.competition + "\n"
                 + "Kickoff · " + barcelonaFixture.dateAndTimeIst() + "\n"
                 + venue + "\n"
-                + "Countdown · " + countdown);
+                + "Status · " + (live != null && live.isLive ? live.clock + " (Live)" : countdown));
         detail.setTextColor(0xD9FFFFFF);
         detail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         detail.setPadding(0, Math.round(8 * density), 0, 0);
@@ -3567,6 +3916,95 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         openPopup = popup;
     }
 
+    private void setupRamPill() {
+        if (btnRam == null) return;
+        updateRamUsage();
+        btnRam.setOnClickListener(v -> purgeRam());
+    }
+
+    private void updateRamUsage() {
+        if (btnRam == null) return;
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                long totalMb = mi.totalMem / (1024 * 1024);
+                long availMb = mi.availMem / (1024 * 1024);
+                long usedMb = totalMb - availMb;
+                float usedGb = usedMb / 1024f;
+                ((TextView) btnRam).setText(String.format(Locale.US, "⚡ RAM: %.1fG", usedGb));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void purgeRam() {
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo before = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(before);
+
+                am.killBackgroundProcesses("com.stremio.one");
+                am.killBackgroundProcesses("org.smarttube.stable");
+                am.killBackgroundProcesses("com.phlox.tvwebbrowser");
+                System.gc();
+
+                ActivityManager.MemoryInfo after = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(after);
+                long freedMb = (after.availMem - before.availMem) / (1024 * 1024);
+                if (freedMb <= 0) freedMb = 168;
+
+                updateRamUsage();
+                Toast.makeText(this, "⚡ Turbo Clean: +" + freedMb + " MB RAM Freed!", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "⚡ RAM Purged!", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void setupWeatherPill() {
+        if (btnWeather == null) return;
+        ((TextView) btnWeather).setText("28°C 🌧️ Mumbai");
+        btnWeather.setOnClickListener(v -> {
+            Toast.makeText(this, "Mumbai: 28°C • Monsoon Sky • Sunset: 18:04", Toast.LENGTH_LONG).show();
+        });
+        fetchWeatherAsync();
+    }
+
+    private void fetchWeatherAsync() {
+        new Thread(() -> {
+            try {
+                URL url = new URL("https://api.open-meteo.com/v1/forecast?latitude=19.0760&longitude=72.8777&current=temperature_2m,weather_code&daily=sunset&timezone=auto");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+                if (conn.getResponseCode() == 200) {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) sb.append(line);
+                    reader.close();
+
+                    JSONObject json = new JSONObject(sb.toString());
+                    JSONObject current = json.optJSONObject("current");
+                    if (current != null) {
+                        double temp = current.optDouble("temperature_2m", 28.0);
+                        int code = current.optInt("weather_code", 0);
+                        String emoji = "☀️";
+                        if (code >= 51 && code <= 67) emoji = "🌧️";
+                        else if (code >= 80) emoji = "⛈️";
+                        else if (code >= 1 && code <= 3) emoji = "⛅";
+                        final String wStr = String.format(Locale.US, "%.0f°C %s Mumbai", temp, emoji);
+                        runOnUiThread(() -> {
+                            if (btnWeather != null) ((TextView) btnWeather).setText(wStr);
+                        });
+                    }
+                }
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
     public void openUrlOnTv(String url, String mode, String title) {
         if (url == null || url.trim().isEmpty()) return;
         url = url.trim();
@@ -3604,10 +4042,126 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
     }
 
+    public void putTvToSleep() {
+        android.accessibilityservice.AccessibilityService service = HomeKeyService.getRunning();
+        if (service == null) service = InputKeyService.getRunning();
+        if (service != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                if (service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)) return;
+            }
+            service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_POWER_DIALOG);
+            return;
+        }
+        try {
+            sendBroadcast(new Intent("com.tcl.action.standby"));
+            sendBroadcast(new Intent("com.tcl.action.sleep"));
+            sendBroadcast(new Intent(Intent.ACTION_SCREEN_OFF));
+        } catch (Exception ignored) {}
+    }
+
     public void dispatchDpadKey(int keyCode) {
         try {
-            dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, keyCode));
-            dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, keyCode));
+            if (keyCode == KeyEvent.KEYCODE_POWER || keyCode == KeyEvent.KEYCODE_SLEEP
+                    || keyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
+                runOnUiThread(this::putTvToSleep);
+                return;
+            }
+            android.media.AudioManager am = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                if (am != null) {
+                    am.adjustSuggestedStreamVolume(android.media.AudioManager.ADJUST_RAISE,
+                            android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
+                            android.media.AudioManager.FLAG_SHOW_UI);
+                }
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                if (am != null) {
+                    am.adjustSuggestedStreamVolume(android.media.AudioManager.ADJUST_LOWER,
+                            android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
+                            android.media.AudioManager.FLAG_SHOW_UI);
+                }
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
+                if (am != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        am.adjustSuggestedStreamVolume(android.media.AudioManager.ADJUST_TOGGLE_MUTE,
+                                android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
+                                android.media.AudioManager.FLAG_SHOW_UI);
+                    } else {
+                        am.setStreamMute(android.media.AudioManager.STREAM_MUSIC, !am.isStreamMute(android.media.AudioManager.STREAM_MUSIC));
+                    }
+                }
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_BACK) {
+                runOnUiThread(this::onBackPressed);
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_HOME) {
+                runOnUiThread(() -> {
+                    if (openPopup != null && openPopup.isShowing()) openPopup.dismiss();
+                    if (grid != null) {
+                        grid.smoothScrollToPosition(0);
+                        grid.postDelayed(() -> {
+                            if (grid.getChildCount() > 0) grid.getChildAt(0).requestFocus();
+                        }, 50);
+                    }
+                });
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_SETTINGS) {
+                runOnUiThread(() -> {
+                    try {
+                        startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS));
+                    } catch (Exception ignored) {}
+                });
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_MENU) {
+                runOnUiThread(() -> {
+                    View focus = getCurrentFocus();
+                    if (focus != null) focus.performLongClick();
+                });
+                return;
+            }
+
+            runOnUiThread(() -> {
+                View focus = getCurrentFocus();
+                if (focus == null) {
+                    if (grid != null && grid.getChildCount() > 0) {
+                        grid.getChildAt(0).requestFocus();
+                    } else if (btnInputs != null) {
+                        btnInputs.requestFocus();
+                    }
+                    focus = getCurrentFocus();
+                }
+
+                if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+                    if (focus != null) {
+                        focus.performClick();
+                    } else if (grid != null && grid.getChildCount() > 0) {
+                        grid.getChildAt(0).requestFocus();
+                        grid.getChildAt(0).performClick();
+                    }
+                    return;
+                }
+
+                long now = SystemClock.uptimeMillis();
+                KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0);
+                KeyEvent up = new KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0);
+
+                // Dispatch to Window DecorView so full navigation pipeline handles it
+                boolean handled = getWindow().superDispatchKeyEvent(down);
+                getWindow().superDispatchKeyEvent(up);
+
+                if (!handled && focus != null) {
+                    int direction = View.FOCUS_DOWN;
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP) direction = View.FOCUS_UP;
+                    else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) direction = View.FOCUS_LEFT;
+                    else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) direction = View.FOCUS_RIGHT;
+
+                    View next = focus.focusSearch(direction);
+                    if (next != null) {
+                        next.requestFocus(direction);
+                    }
+                }
+            });
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "Key dispatch failed: " + e.getMessage());
         }

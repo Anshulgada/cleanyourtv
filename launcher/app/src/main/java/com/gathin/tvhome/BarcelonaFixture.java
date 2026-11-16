@@ -36,10 +36,16 @@ final class BarcelonaFixture {
     String compactLabel(Instant now) {
         if (!kickoffKnown || kickoff == null) return "Barça • " + shortOpponent() + " • TBA";
         Duration left = Duration.between(now, kickoff);
-        if (left.isNegative() || left.isZero()) return "MATCH IN PROGRESS";
+        if (left.isNegative() || left.isZero()) {
+            BarcelonaLiveScoreManager.LiveScore live = BarcelonaLiveScoreManager.getCurrentScore();
+            if (live != null && (live.isLive || live.isCompleted)) {
+                return live.formatLabel();
+            }
+            return "Barça • " + shortOpponent() + " • Live";
+        }
         long seconds = left.getSeconds();
-        if (seconds < 3600) return "Barça • " + Math.max(0, seconds / 60) + "m " + (seconds % 60) + "s";
-        if (seconds < 24 * 3600) return "Barça • " + (seconds / 3600) + "h " + ((seconds % 3600) / 60) + "m";
+        if (seconds < 3600) return String.format(Locale.US, "Barça • %02dm %02ds", Math.max(0, seconds / 60), (seconds % 60));
+        if (seconds < 24 * 3600) return String.format(Locale.US, "Barça • %02dh %02dm", (seconds / 3600), ((seconds % 3600) / 60));
         return "Barça • " + shortOpponent() + " • " + ((seconds + 86_399) / 86_400) + "d";
     }
 

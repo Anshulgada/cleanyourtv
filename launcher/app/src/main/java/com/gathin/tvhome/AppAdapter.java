@@ -61,6 +61,9 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         /** Hold OK on a tile: the activity shows the tile menu (move, remove from Home, app info). */
         void onTileLongPress(int position, View card);
         void onLibraryUp();
+        void onLibraryDown();
+        void onShelfUp(int shelfIndex);
+        void onShelfDown(int shelfIndex);
         /** A tile whose launch_actions entry is "input:<id>": switch to that TV input instead of opening an app. */
         void onOpenInput(String inputId);
     }
@@ -248,6 +251,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.appLabels = cfg.appLabels;
         this.appBanners = cfg.appBanners;
         this.uniformTiles = cfg.uniformTiles;
+        this.shelvesAboveApps = ctx.getSharedPreferences("cleanyourtv_shelf", Context.MODE_PRIVATE)
+                .getBoolean("shelves_above_apps", false);
         // Tiles keep their identity across reload(), so a focused tile stays on its app instead of
         // its view being rebound to whatever app now sits in that slot.
         setHasStableIds(true);
@@ -406,10 +411,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             button.setOnKeyListener((v, key, event) -> {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
                 if (key == KeyEvent.KEYCODE_DPAD_UP) listener.onLibraryUp();
+                if (key == KeyEvent.KEYCODE_DPAD_DOWN) listener.onLibraryDown();
                 return key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN
                         || key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT;
             });
             return new RecyclerView.ViewHolder(row) { };
+        }
+        if (viewType == 2 || viewType == 3) {
+            View row = LayoutInflater.from(ctx).inflate(R.layout.row_content_shelf, parent, false);
+            return new ShelfViewHolder(row);
         }
         View v = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_app, parent, false);
         float density = parent.getResources().getDisplayMetrics().density;
@@ -459,8 +469,44 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     @SuppressWarnings("deprecation")
     public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
         if (isLibraryAt(position)) return;
+        if (isStremioShelfAt(position)) {
+            ShelfViewHolder svh = (ShelfViewHolder) holder;
+            svh.title.setText("CONTINUE WATCHING");
+            svh.badge.setText("STREMIO");
+            svh.badge.setBackgroundResource(R.drawable.shelf_badge_stremio);
+            svh.badge.setTextColor(Color.WHITE);
+            List<MediaShelfItem> stremioItems = MediaShelfManager.getStremioContinueWatching(ctx);
+            if (svh.recycler.getAdapter() instanceof ContentShelfAdapter) {
+                ((ContentShelfAdapter) svh.recycler.getAdapter()).updateItems(stremioItems);
+            } else {
+                svh.recycler.setAdapter(new ContentShelfAdapter(ctx, stremioItems, false, 0, new ContentShelfAdapter.ShelfListener() {
+                    @Override public void onShelfUp(int idx) { listener.onShelfUp(idx); }
+                    @Override public void onShelfDown(int idx) { listener.onShelfDown(idx); }
+                }));
+            }
+            return;
+        }
+        if (isSmartTubeShelfAt(position)) {
+            ShelfViewHolder svh = (ShelfViewHolder) holder;
+            svh.title.setText("SUBSCRIPTIONS & HIGHLIGHTS");
+            svh.badge.setText("SMARTTUBE");
+            svh.badge.setBackgroundResource(R.drawable.shelf_badge_smarttube);
+            svh.badge.setTextColor(Color.WHITE);
+            List<MediaShelfItem> smartTubeItems = MediaShelfManager.getSmartTubeFeed(ctx);
+            if (svh.recycler.getAdapter() instanceof ContentShelfAdapter) {
+                ((ContentShelfAdapter) svh.recycler.getAdapter()).updateItems(smartTubeItems);
+            } else {
+                svh.recycler.setAdapter(new ContentShelfAdapter(ctx, smartTubeItems, true, 1, new ContentShelfAdapter.ShelfListener() {
+                    @Override public void onShelfUp(int idx) { listener.onShelfUp(idx); }
+                    @Override public void onShelfDown(int idx) { listener.onShelfDown(idx); }
+                }));
+            }
+            return;
+        }
         Holder h = (Holder) holder;
-        Entry e = items.get(position);
+        int itemIdx = itemIndexForPosition(position);
+        if (itemIdx < 0 || itemIdx >= items.size()) return;
+        Entry e = items.get(itemIdx);
         if (e.kind == Entry.EMPTY) {
             // A free dock slot keeps its place in the row and the band, but shows nothing and takes no focus.
             h.card.setVisibility(View.INVISIBLE);
@@ -477,7 +523,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         h.name.setText(e.name);
         // The dock has no labels, unless always_show_names asks for them (DockDecoration then makes room in the band).
         // In a single row every tile is the dock's kind: the big title above names it.
-        boolean dockKind = DockSlots.inDockRow(dockRow, singleRow, position, dockSize);
+        boolean dockKind = DockSlots.inDockRow(dockRow, singleRow, itemIdx, dockSize);
         h.name.setVisibility(dockKind && restNameAlpha == 0f ? View.INVISIBLE : View.VISIBLE);
         h.inDock = dockKind;
         boolean focused = h.card.isFocused();   // a rebind after reload() can hit the focused tile
@@ -512,7 +558,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         h.card.setOnLongClickListener(v -> {
             if (tileMenu) {
                 int pos = h.getBindingAdapterPosition();
-                if (pos != RecyclerView.NO_POSITION) listener.onTileLongPress(pos, v);
+                int idx = itemIndexForPosition(pos);
+                if (idx != -1) listener.onTileLongPress(pos, v);
                 return true;
             }
             Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + e.pkg));
@@ -562,16 +609,128 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
     }
 
-    @Override
-    public int getItemCount() {
-        return items.size() + (showLibrary ? 1 : 0);
+    private boolean showStremioShelf = true;
+    private boolean showSmartTubeShelf = true;
+    private boolean shelvesAboveApps;
+
+    public boolean isShelvesAboveApps() {
+        return shelvesAboveApps;
     }
 
-    int appCount() { return items.size(); }
+    public void setShelvesAboveApps(boolean above) {
+        if (this.shelvesAboveApps != above) {
+            this.shelvesAboveApps = above;
+            ctx.getSharedPreferences("cleanyourtv_shelf", Context.MODE_PRIVATE)
+                    .edit().putBoolean("shelves_above_apps", above).apply();
+            notifyDataSetChanged();
+        }
+    }
 
-    boolean isLibraryAt(int position) { return showLibrary && position == items.size(); }
+    public int getDockSize() {
+        return dockSize;
+    }
 
-    @Override public int getItemViewType(int position) { return isLibraryAt(position) ? 1 : 0; }
+    public int getRawAppCount() {
+        return items.size();
+    }
+
+    public int getShelfCount() {
+        return (showStremioShelf ? 1 : 0) + (showSmartTubeShelf ? 1 : 0);
+    }
+
+    public void notifyShelvesChanged() {
+        int stremioPos = getStremioPosition();
+        if (stremioPos != -1) notifyItemChanged(stremioPos);
+        int smartTubePos = getSmartTubePosition();
+        if (smartTubePos != -1) notifyItemChanged(smartTubePos);
+    }
+
+    public int getStremioPosition() {
+        if (!showStremioShelf) return -1;
+        if (shelvesAboveApps) {
+            return Math.min(dockSize, items.size());
+        } else {
+            return items.size() + (showLibrary ? 1 : 0);
+        }
+    }
+
+    public int getSmartTubePosition() {
+        if (!showSmartTubeShelf) return -1;
+        if (shelvesAboveApps) {
+            return Math.min(dockSize, items.size()) + (showStremioShelf ? 1 : 0);
+        } else {
+            return items.size() + (showLibrary ? 1 : 0) + (showStremioShelf ? 1 : 0);
+        }
+    }
+
+    public int getLibraryPosition() {
+        if (!showLibrary) return -1;
+        if (shelvesAboveApps) {
+            return items.size() + getShelfCount();
+        } else {
+            return items.size();
+        }
+    }
+
+    @Override
+    public int getItemCount() {
+        int count = items.size();
+        if (showLibrary) count++;
+        if (showStremioShelf) count++;
+        if (showSmartTubeShelf) count++;
+        return count;
+    }
+
+    int appCount() {
+        return shelvesAboveApps ? items.size() + getShelfCount() : items.size();
+    }
+
+    public boolean isLibraryAt(int position) {
+        return position != -1 && position == getLibraryPosition();
+    }
+
+    public boolean isStremioShelfAt(int position) {
+        return position != -1 && position == getStremioPosition();
+    }
+
+    public boolean isSmartTubeShelfAt(int position) {
+        return position != -1 && position == getSmartTubePosition();
+    }
+
+    public int itemIndexForPosition(int position) {
+        if (!shelvesAboveApps) {
+            return (position >= 0 && position < items.size()) ? position : -1;
+        }
+        int dockCount = Math.min(dockSize, items.size());
+        int shelfCount = getShelfCount();
+        if (position >= 0 && position < dockCount) {
+            return position;
+        }
+        if (position >= dockCount + shelfCount && position < items.size() + shelfCount) {
+            return position - shelfCount;
+        }
+        return -1;
+    }
+
+    public int positionForItemIndex(int itemIndex) {
+        if (itemIndex < 0 || itemIndex >= items.size()) return -1;
+        if (!shelvesAboveApps) {
+            return itemIndex;
+        }
+        int dockCount = Math.min(dockSize, items.size());
+        if (itemIndex < dockCount) {
+            return itemIndex;
+        }
+        return itemIndex + getShelfCount();
+    }
+
+    @Override
+    public int getItemViewType(int position) {
+        if (isLibraryAt(position)) return 1;
+        if (isStremioShelfAt(position)) return 2;
+        if (isSmartTubeShelfAt(position)) return 3;
+        return 0;
+    }
 
     boolean containsPackage(String pkg) {
         for (Entry entry : items) if (entry.pkg.equals(pkg)) return true;
@@ -580,7 +739,30 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     @Override
     public long getItemId(int position) {
-        return isLibraryAt(position) ? Long.MIN_VALUE : items.get(position).component.flattenToShortString().hashCode();
+        if (isLibraryAt(position)) return Long.MIN_VALUE;
+        if (isStremioShelfAt(position)) return Long.MIN_VALUE + 1;
+        if (isSmartTubeShelfAt(position)) return Long.MIN_VALUE + 2;
+        int itemIdx = itemIndexForPosition(position);
+        if (itemIdx >= 0 && itemIdx < items.size()) {
+            return items.get(itemIdx).component.flattenToShortString().hashCode();
+        }
+        return RecyclerView.NO_ID;
+    }
+
+    static class ShelfViewHolder extends RecyclerView.ViewHolder {
+        final TextView title;
+        final TextView badge;
+        final RecyclerView recycler;
+
+        ShelfViewHolder(@NonNull View itemView) {
+            super(itemView);
+            title = itemView.findViewById(R.id.shelfTitle);
+            badge = itemView.findViewById(R.id.shelfBadge);
+            recycler = itemView.findViewById(R.id.shelfRecycler);
+            recycler.setLayoutManager(new androidx.recyclerview.widget.LinearLayoutManager(
+                    itemView.getContext(), androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL, false));
+            recycler.setNestedScrollingEnabled(false);
+        }
     }
 
     /** Uses this saved order and dock size from the next reload() (Order.ranks, Order.docked). */
@@ -626,11 +808,13 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     /** Moves one tile; the others shift by one. Stable ids keep the moved tile's view (and its focus). */
     void move(int from, int to) {
-        if (from == to || from < 0 || to < 0 || from >= movableCount() || to >= movableCount()) return;
-        items.add(to, items.remove(from));
+        int fromIdx = itemIndexForPosition(from);
+        int toIdx = itemIndexForPosition(to);
+        if (fromIdx == toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= movableCount() || toIdx >= movableCount()) return;
+        items.add(toIdx, items.remove(fromIdx));
         notifyItemMoved(from, to);
         // The dock row hides names by position: rebind the tiles whose side of the dock edge changed.
-        if (from < dockSize || to < dockSize) {
+        if (fromIdx < dockSize || toIdx < dockSize) {
             int lo = Math.min(from, to), hi = Math.max(from, to);
             notifyItemRangeChanged(lo, hi - lo + 1);
         }
@@ -638,14 +822,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     /** Stable key for the app at a position (its component), or null. */
     String keyAt(int position) {
-        return position >= 0 && position < items.size() ? items.get(position).component.flattenToShortString() : null;
+        int idx = itemIndexForPosition(position);
+        return idx >= 0 && idx < items.size() ? items.get(idx).component.flattenToShortString() : null;
     }
 
     /** Position of the app with this key, or -1 when it is gone. */
     int positionOf(String key) {
         if (key == null) return -1;
         for (int i = 0; i < items.size(); i++) {
-            if (items.get(i).component.flattenToShortString().equals(key)) return i;
+            if (items.get(i).component.flattenToShortString().equals(key)) return positionForItemIndex(i);
         }
         return -1;
     }
@@ -661,17 +846,20 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     }
 
     String labelAt(int position) {
-        return position >= 0 && position < items.size() ? items.get(position).label : "";
+        int idx = itemIndexForPosition(position);
+        return idx >= 0 && idx < items.size() ? items.get(idx).label : "";
     }
 
     String packageAt(int position) {
-        return position >= 0 && position < items.size() ? items.get(position).pkg : null;
+        int idx = itemIndexForPosition(position);
+        return idx >= 0 && idx < items.size() ? items.get(idx).pkg : null;
     }
 
     /** The tile's artwork, its banner or else its icon, for the cinematic shelf's backdrop (HeroArt). */
     Drawable artworkAt(int position) {
-        if (position < 0 || position >= items.size()) return null;
-        Entry e = items.get(position);
+        int idx = itemIndexForPosition(position);
+        if (idx < 0 || idx >= items.size()) return null;
+        Entry e = items.get(idx);
         return e.banner != null ? e.banner : e.icon;
     }
 
@@ -681,8 +869,9 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     /** A vivid colour sampled from the app's banner (or icon), cached per entry; a card's accent when it set one. */
     int ambientColorAt(int position) {
-        if (position < 0 || position >= items.size()) return 0xFF444444;
-        Entry e = items.get(position);
+        int idx = itemIndexForPosition(position);
+        if (idx < 0 || idx >= items.size()) return 0xFF444444;
+        Entry e = items.get(idx);
         if (e.ambient == 0) {
             e.ambient = uniformTiles && e.banner == null ? dominantColor(e.icon) : vividColor(e.banner != null ? e.banner : e.icon);
         }

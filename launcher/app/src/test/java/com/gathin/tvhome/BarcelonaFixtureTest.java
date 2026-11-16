@@ -35,6 +35,6 @@ public class BarcelonaFixtureTest {
 
     @Test public void finalHourUsesCompactCountdown() {
         BarcelonaFixture fixture = BarcelonaFixtureRepository.parse(ICS).get(1);
-        assertEquals("42m TO KICKOFF", fixture.compactLabel(Instant.parse("2026-11-03T19:18:00Z")));
+        assertEquals("Barça • 42m 00s", fixture.compactLabel(Instant.parse("2026-11-03T19:18:00Z")));
     }
 }
