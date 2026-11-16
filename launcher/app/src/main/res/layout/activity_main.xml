@@ -162,7 +162,7 @@
         android:orientation="vertical"
         android:paddingStart="56dp"
         android:paddingEnd="56dp"
-        android:paddingTop="26dp"
+        android:paddingTop="38dp"
         android:clipChildren="false"
         android:clipToPadding="false">
 
@@ -175,10 +175,10 @@
 
             <LinearLayout
                 android:id="@+id/leftBlock"
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_alignParentStart="true"
-                android:layout_toStartOf="@+id/topButtons"
+                android:layout_alignParentTop="true"
                 android:layout_marginEnd="16dp"
                 android:orientation="vertical">
 
@@ -188,7 +188,7 @@
                 <TextView
                     android:id="@+id/greeting"
                     android:gravity="left"
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:singleLine="true"
                     android:ellipsize="end"
@@ -200,7 +200,7 @@
                     android:textAllCaps="true" />
 
                 <LinearLayout
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:orientation="horizontal"
                     android:baselineAligned="true">
@@ -212,7 +212,7 @@
                         android:format12Hour="h:mm"
                         android:format24Hour="HH:mm"
                         android:textColor="#FFFFFFFF"
-                        android:textSize="52sp"
+                        android:textSize="50sp"
                         android:fontFamily="@string/font_light"
                         android:letterSpacing="-0.04"
                         android:fontFeatureSettings="tnum"
@@ -232,74 +232,70 @@
                         android:fontFamily="@string/font_medium"
                         android:letterSpacing="0.08"
                         android:textAllCaps="true" />
-
-                    <View
-                        android:id="@+id/clockDivider"
-                        android:layout_width="1dp"
-                        android:layout_height="26dp"
-                        android:layout_gravity="bottom"
-                        android:layout_marginStart="16dp"
-                        android:layout_marginEnd="16dp"
-                        android:layout_marginBottom="8dp"
-                        android:background="#33FFFFFF" />
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_weight="1"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="bottom"
-                        android:layout_marginBottom="9dp"
-                        android:orientation="vertical">
-
-                        <!-- Shamsi date ("27 Mehr 1405"), shown when shamsi_date is on. -->
-                        <TextView
-                            android:id="@+id/shamsiDate"
-                            android:gravity="left"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:singleLine="true"
-                            android:ellipsize="end"
-                            android:textColor="#E6FFFFFF"
-                            android:textSize="17sp"
-                            android:fontFamily="@string/font_regular"
-                            android:letterSpacing="0.02"
-                            android:includeFontPadding="false"
-                            android:visibility="gone" />
-
-                        <TextClock
-                            android:id="@+id/date"
-                            android:gravity="left"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:singleLine="@bool/date_single_line"
-                            android:maxLines="2"
-                            android:lineSpacingExtra="6dp"
-                            android:ellipsize="end"
-                            android:format12Hour="@string/date_format_home"
-                            android:format24Hour="@string/date_format_home"
-                            android:textColor="#A6FFFFFF"
-                            android:textSize="14sp"
-                            android:fontFamily="@string/font_regular"
-                            android:letterSpacing="0.14"
-                            android:textAllCaps="true" />
-
-                        <!-- Lunar date ("Lunar 13/9 · Year of the Horse"), shown when lunar_date is on. -->
-                        <TextView
-                            android:id="@+id/lunarDate"
-                            android:gravity="left"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="4dp"
-                            android:singleLine="true"
-                            android:ellipsize="end"
-                            android:textColor="#80FFFFFF"
-                            android:textSize="14sp"
-                            android:fontFamily="@string/font_regular"
-                            android:letterSpacing="0.14"
-                            android:textAllCaps="true"
-                            android:visibility="gone" />
-                    </LinearLayout>
                 </LinearLayout>
+
+                <!-- Day and Date positioned under the Time so pills do not truncate it -->
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginTop="2dp"
+                    android:orientation="vertical">
+
+                    <!-- Shamsi date ("27 Mehr 1405"), shown when shamsi_date is on. -->
+                    <TextView
+                        android:id="@+id/shamsiDate"
+                        android:gravity="left"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:singleLine="true"
+                        android:ellipsize="end"
+                        android:textColor="#E6FFFFFF"
+                        android:textSize="14sp"
+                        android:fontFamily="@string/font_regular"
+                        android:letterSpacing="0.02"
+                        android:includeFontPadding="false"
+                        android:visibility="gone" />
+
+                    <TextClock
+                        android:id="@+id/date"
+                        android:gravity="left"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:singleLine="true"
+                        android:maxLines="1"
+                        android:ellipsize="end"
+                        android:format12Hour="@string/date_format_home"
+                        android:format24Hour="@string/date_format_home"
+                        android:textColor="#A6FFFFFF"
+                        android:textSize="12sp"
+                        android:includeFontPadding="false"
+                        android:fontFamily="@string/font_regular"
+                        android:letterSpacing="0.04"
+                        android:textAllCaps="true" />
+
+                    <!-- Lunar date ("Lunar 13/9 · Year of the Horse"), shown when lunar_date is on. -->
+                    <TextView
+                        android:id="@+id/lunarDate"
+                        android:gravity="left"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:singleLine="true"
+                        android:ellipsize="end"
+                        android:textColor="#80FFFFFF"
+                        android:textSize="13sp"
+                        android:fontFamily="@string/font_regular"
+                        android:letterSpacing="0.10"
+                        android:textAllCaps="true"
+                        android:visibility="gone" />
+                </LinearLayout>
+
+                <View
+                    android:id="@+id/clockDivider"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
 
             </LinearLayout>
 
@@ -322,13 +318,13 @@
                 android:focusable="false"
                 android:visibility="gone" />
 
+            <!-- Row 1: Primary Top Pills -->
             <LinearLayout
                 android:id="@+id/topButtons"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_alignParentEnd="true"
-                android:layout_alignBottom="@id/leftBlock"
-                android:layout_marginBottom="6dp"
+                android:layout_alignParentTop="true"
                 android:clipChildren="false"
                 android:clipToPadding="false"
                 android:orientation="horizontal">
@@ -336,9 +332,25 @@
                 <TextView
                     android:id="@+id/btnInputs"
                     style="@style/TopButton"
-                    android:text="@string/inputs"
-                    android:drawableStart="@drawable/ic_input"
-                    android:nextFocusDown="@+id/grid" />
+                    android:minWidth="156dp"
+                    android:gravity="center"
+                    android:fontFeatureSettings="tnum"
+                    android:maxWidth="330dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="@string/barcelona_loading"
+                    android:drawableStart="@drawable/ic_fcb_crest"
+                    android:nextFocusDown="@+id/btnRam" />
+
+                <TextView
+                    android:id="@+id/btnCast"
+                    style="@style/TopButton"
+                    android:maxWidth="210dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="@string/push_to_tv"
+                    android:drawableStart="@drawable/ic_app_logo_nobg"
+                    android:nextFocusDown="@+id/btnRam" />
 
                 <TextView
                     android:id="@+id/btnWifi"
@@ -348,7 +360,7 @@
                     android:ellipsize="end"
                     android:text="@string/wifi"
                     android:drawableStart="@drawable/ic_wifi"
-                    android:nextFocusDown="@+id/grid" />
+                    android:nextFocusDown="@+id/btnWeather" />
 
                 <TextView
                     android:id="@+id/btnVpn"
@@ -356,14 +368,14 @@
                     android:visibility="gone"
                     android:singleLine="true"
                     android:text="@string/vpn"
-                    android:nextFocusDown="@+id/grid" />
+                    android:nextFocusDown="@+id/btnWeather" />
 
                 <TextView
                     android:id="@+id/btnReorder"
                     style="@style/TopButtonIcon"
                     android:contentDescription="@string/reorder"
                     android:drawableStart="@drawable/ic_swap_vert"
-                    android:nextFocusDown="@+id/grid" />
+                    android:nextFocusDown="@+id/btnWeather" />
 
                 <TextView
                     android:id="@+id/btnLibraryTop"
@@ -371,13 +383,48 @@
                     android:visibility="gone"
                     android:contentDescription="@string/app_library"
                     android:drawableStart="@drawable/ic_apps_pill"
-                    android:nextFocusDown="@+id/grid" />
+                    android:nextFocusDown="@+id/btnWeather" />
 
                 <TextView
                     android:id="@+id/btnSettings"
                     style="@style/TopButton"
                     android:text="@string/settings"
                     android:drawableStart="@drawable/ic_settings"
+                    android:nextFocusDown="@+id/btnWeather" />
+            </LinearLayout>
+
+            <!-- Row 2: Secondary Telemetry Pills (Right-Aligned beneath Row 1) -->
+            <LinearLayout
+                android:id="@+id/secondaryButtons"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignParentEnd="true"
+                android:layout_below="@id/topButtons"
+                android:layout_marginTop="6dp"
+                android:clipChildren="false"
+                android:clipToPadding="false"
+                android:gravity="center_vertical|end"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/btnRam"
+                    style="@style/TopButton"
+                    android:maxWidth="210dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="⚡ RAM: 1.1G"
+                    android:nextFocusUp="@+id/btnInputs"
+                    android:nextFocusDown="@+id/grid" />
+
+                <TextView
+                    android:id="@+id/btnWeather"
+                    style="@style/TopButton"
+                    android:maxWidth="220dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:text="28°C 🌧️ Mumbai"
+                    android:drawableStart="@drawable/ic_weather"
+                    android:nextFocusUp="@+id/btnSettings"
                     android:nextFocusDown="@+id/grid" />
             </LinearLayout>
         </RelativeLayout>

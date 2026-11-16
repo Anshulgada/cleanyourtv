@@ -35,7 +35,11 @@ public class InputKeyService extends AccessibilityService {
     /** Stops key filtering while a game controller is connected or after a volume change; null unless gamepad_passthrough or volume_pauses_filter, and key_filter. */
     private GamepadPassthrough gamepads;
     /** The bound helper, for global actions Home's own key path asks for (RemoteKeys). */
-    static InputKeyService running;
+    static volatile InputKeyService running;
+
+    public static InputKeyService getRunning() {
+        return running;
+    }
 
     @Override
     protected void onServiceConnected() {
@@ -67,6 +71,16 @@ public class InputKeyService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
+                || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    if (performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)) return true;
+                }
+                performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+            }
+            return true;
+        }
         if (consumeVolumeKeys && VolumeKeys.handle(this, event)) return true;
         // A scancode entry is more specific than any keycode, so it goes first.
         if (RemoteKeys.handle(this, event, RemoteKeys.tap(appScancodes.get(event.getScanCode()),
@@ -88,6 +102,7 @@ public class InputKeyService extends AccessibilityService {
     /** Unbound by Android: the user turned the helper off, so Home doesn't put it back (ServiceRepair). */
     @Override
     public boolean onUnbind(Intent intent) {
+        if (running == this) running = null;
         RemoteKeys.release(this);
         if (repairRecord) ServiceRepair.disconnected(this, getClass());
         return super.onUnbind(intent);

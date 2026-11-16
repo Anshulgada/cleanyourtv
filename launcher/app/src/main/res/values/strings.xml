@@ -2,6 +2,17 @@
 <resources>
     <string name="app_name">Home</string>
     <string name="inputs">Inputs</string>
+    <string name="barcelona_loading">Barça · fixtures</string>
+    <string name="barcelona_no_fixture">Barça · no upcoming fixture</string>
+    <string name="barcelona_details">FC Barcelona</string>
+    <string name="push_to_tv">Cast &amp; Remote</string>
+    <string name="push_to_tv_title">Push to TV &amp; Web Remote</string>
+    <string name="push_to_tv_subtitle">Scan QR or browse on PC / Phone:\n%1$s\n(mDNS: http://tcl-tv.local:8080)</string>
+    <string name="push_to_tv_status">Browser: TV Bro (Ad-Block Ready)\nStremio: %1$s</string>
+    <string name="stremio_active">Active (60m Auto-Hibernate Armed)</string>
+    <string name="stremio_idle">Hibernated / Inactive (RAM Free)</string>
+    <string name="btn_hibernate_stremio">Free Stremio RAM Now</string>
+    <string name="stremio_reclaimed_toast">Stremio hibernated. ~160 MB RAM freed!</string>
     <string name="wifi">Wi-Fi</string>
     <string name="settings">Settings</string>
     <string name="choose_input">Inputs</string>
@@ -23,7 +34,7 @@
     <string name="offline">Offline</string>
     <string name="not_available">Not available on this TV</string>
     <string name="cant_open">Can\'t open %1$s</string>
-    <string name="date_format">EEEE  d MMMM</string>
+    <string name="date_format">EEEE, d MMMM</string>
     <!-- Date next to the clock on Home; a locale can split it over two lines with \n. -->
     <string name="date_format_home" translatable="false">@string/date_format</string>
     <string name="shamsi_month_farvardin">Farvardin</string>

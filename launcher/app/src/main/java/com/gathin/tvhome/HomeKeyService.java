@@ -91,7 +91,11 @@ public class HomeKeyService extends AccessibilityService {
     /** disableSelf is how this service leaves for standby, not the user turning it off. */
     private boolean steppingOut;
     /** The bound helper, so the opt-in broadcast can arm it without waiting for a new connection. */
-    static HomeKeyService running;
+    static volatile HomeKeyService running;
+
+    public static HomeKeyService getRunning() {
+        return running;
+    }
 
     @Override
     protected void onServiceConnected() {
@@ -260,6 +264,16 @@ public class HomeKeyService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
+                || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    if (performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)) return true;
+                }
+                performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+            }
+            return true;
+        }
         // power_on_home: the first key after power-on hands the TV to the user (power and wake keys don't count).
         if (powerOnUntil != 0 && event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getKeyCode() != KeyEvent.KEYCODE_POWER && event.getKeyCode() != KeyEvent.KEYCODE_WAKEUP) {
@@ -313,6 +327,7 @@ public class HomeKeyService extends AccessibilityService {
     /** Unbound by Android: the user turned the helper off, so Home doesn't put it back (ServiceRepair). */
     @Override
     public boolean onUnbind(Intent intent) {
+        if (running == this) running = null;
         RemoteKeys.release(this);
         if (repairRecord && !steppingOut) ServiceRepair.disconnected(this, getClass());
         return super.onUnbind(intent);
