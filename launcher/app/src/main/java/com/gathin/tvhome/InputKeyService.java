@@ -3,6 +3,7 @@ package com.gathin.tvhome;
 import android.accessibilityservice.AccessibilityService;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 import java.util.Collections;
@@ -71,13 +72,29 @@ public class InputKeyService extends AccessibilityService {
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
-                || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
+        // Remap the remote's mic/voice-search button to open Wi-Fi settings directly.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_VOICE_ASSIST
+                || event.getKeyCode() == KeyEvent.KEYCODE_SEARCH
+                || event.getKeyCode() == KeyEvent.KEYCODE_ASSIST) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                    if (performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)) return true;
+                try {
+                    startActivity(SystemSettings.intent(this, Settings.ACTION_WIFI_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (Exception ignored) {}
+            }
+            return true;
+        }
+        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER) {
+            return false;
+        }
+        int kc = event.getKeyCode();
+        if (kc == KeyEvent.KEYCODE_SETTINGS || kc == KeyEvent.KEYCODE_NOTIFICATION
+                || kc == 83 || kc == 176 || kc == 4077 || kc == 304 || kc == 268) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                try {
+                    startActivity(SystemSettings.intent(this, android.provider.Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (ActivityNotFoundException | SecurityException ignored) {
                 }
-                performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
             }
             return true;
         }

@@ -141,6 +141,7 @@ public class HomeKeyService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        stopLogcatKeyReader();
         if (running == this) running = null;
         RemoteKeys.frontPackage = "";
         RemoteKeys.release(this);
@@ -229,7 +230,8 @@ public class HomeKeyService extends AccessibilityService {
         }
         // home_key_service.xml subscribes to no events, so the redirects ask for window changes only when one is on.
         AccessibilityServiceInfo info = getServiceInfo();
-        if (info != null && (!stockHome.isEmpty() || !powerOnLiveTv.isEmpty() || watchFront)) {
+        if (info != null) {
+            // Watch window changes for stock-home/power-on redirects and for remapping the mic button.
             info.eventTypes |= AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
             // setServiceInfo() rewrites flags and drops the XML's flagRequestFilterKeyEvents, so a
             // key_filter build that also uses a window-watching redirect loses key filtering (gear/app
@@ -243,6 +245,81 @@ public class HomeKeyService extends AccessibilityService {
         holdAppScancodes = RemoteKeys.parseHoldAppScancodes(config.appKeys);
         // gamepad_passthrough and volume_pauses_filter, off by default.
         if (gamepads == null) gamepads = GamepadPassthrough.start(this, config);
+        startLogcatKeyReader();
+    }
+
+    private Thread logcatThread;
+    private volatile boolean logcatRunning = false;
+    private long lastSettingsKeyLaunchTime = 0;
+    private long lastPowerKeyTime = 0;
+
+    private void startLogcatKeyReader() {
+        if (logcatRunning) return;
+        logcatRunning = true;
+        logcatThread = new Thread(() -> {
+            Process process = null;
+            java.io.BufferedReader reader = null;
+            try {
+                // Reads live debug logs from WindowManager and TclPhoneWindowManager
+                process = Runtime.getRuntime().exec(new String[]{"logcat", "-v", "brief", "-T", "1", "-s", "WindowManager:D", "TclPhoneWindowManager:D"});
+                reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream()));
+                String line;
+                java.util.regex.Pattern p = java.util.regex.Pattern.compile("(handleKeyBeforeQueueing|handleKeyBeforeDispatching).*?(key\\s*=\\s*|keyCode=|scanCode=)(83|176|4077|304|268|233|240|561|KEYCODE_NOTIFICATION|KEYCODE_SETTINGS)");
+                while (logcatRunning && (line = reader.readLine()) != null) {
+                    // TCL swallows KEYCODE_POWER (26) / scancode 116 and tries to start com.tcl.tv's GlobalKeyService,
+                    // which is disabled, so handle standby from the log line instead.
+                    if (line.contains("handleKeyBeforeQueueing")
+                            && (line.contains("key = 26") || line.contains("keyCode=26")
+                            || line.contains("scanCode=116") || line.contains("key = 116"))) {
+                        if (line.contains("down = true") || !line.contains("disable")) {
+                            long now = SystemClock.uptimeMillis();
+                            if (now - lastPowerKeyTime > 1000) {
+                                lastPowerKeyTime = now;
+                                PowerManager pm = getSystemService(PowerManager.class);
+                                if (pm == null || pm.isInteractive()) {
+                                    handler.post(() -> {
+                                        PowerManager pwr = getSystemService(PowerManager.class);
+                                        if (pwr != null && !pwr.isInteractive()) return;
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                            performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
+                                        } else {
+                                            performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if (p.matcher(line).find()) {
+                        long now = SystemClock.uptimeMillis();
+                        if (now - lastSettingsKeyLaunchTime > 750) {
+                            lastSettingsKeyLaunchTime = now;
+                            Intent open = settingsPanel ? new Intent(this, QuickSettingsActivity.class)
+                                    : SystemSettings.intent(this, Settings.ACTION_SETTINGS);
+                            if (settingsClearTask && !settingsPanel) open.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                            try {
+                                startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (reader != null) try { reader.close(); } catch (Exception ignored) {}
+                if (process != null) process.destroy();
+            }
+        }, "TclLogcatKeyReader");
+        logcatThread.setDaemon(true);
+        logcatThread.start();
+    }
+
+    private void stopLogcatKeyReader() {
+        logcatRunning = false;
+        if (logcatThread != null) {
+            logcatThread.interrupt();
+            logcatThread = null;
+        }
     }
 
     /** A tap's target: the "front:" entry while the button's own app is already in front, else the usual one. */
@@ -256,23 +333,48 @@ public class HomeKeyService extends AccessibilityService {
     }
 
     private boolean isSettingsKey(KeyEvent event) {
-        if (event.getKeyCode() == KeyEvent.KEYCODE_SETTINGS) return true;
+        int kc = event.getKeyCode();
+        if (kc == KeyEvent.KEYCODE_SETTINGS || kc == KeyEvent.KEYCODE_NOTIFICATION
+                || kc == 83 || kc == 176 || kc == 4077 || kc == 304 || kc == 268) {
+            return true;
+        }
         if (isSettingsScancode(event)) return true;
-        for (int code : settingsKeycodes) if (event.getKeyCode() == code) return true;
+        for (int code : settingsKeycodes) if (kc == code) return true;
         return false;
     }
 
     @Override
     protected boolean onKeyEvent(KeyEvent event) {
-        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
-                || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
+        // Remap the remote's mic/voice-search button to open Wi-Fi settings directly.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_VOICE_ASSIST
+                || event.getKeyCode() == KeyEvent.KEYCODE_SEARCH
+                || event.getKeyCode() == KeyEvent.KEYCODE_ASSIST) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    if (performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)) return true;
-                }
-                performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+                try {
+                    startActivity(SystemSettings.intent(this, Settings.ACTION_WIFI_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (Exception ignored) {}
             }
             return true;
+        }
+        // TCL's phone window manager swallows KEYCODE_POWER and tries to start com.tcl.tv's GlobalKeyService, which
+        // is disabled, so the remote's Power button does nothing. Put the TV into standby ourselves instead.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getScanCode() == 116
+                || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
+                || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
+            PowerManager power = getSystemService(PowerManager.class);
+            // While the screen is off the hardware MCU owns waking the TV; leave the key to the system then.
+            if (power == null || power.isInteractive()) {
+                if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
+                    } else {
+                        performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
+                    }
+                }
+                return true;
+            }
+            return false;
         }
         // power_on_home: the first key after power-on hands the TV to the user (power and wake keys don't count).
         if (powerOnUntil != 0 && event.getAction() == KeyEvent.ACTION_DOWN
@@ -327,15 +429,30 @@ public class HomeKeyService extends AccessibilityService {
     /** Unbound by Android: the user turned the helper off, so Home doesn't put it back (ServiceRepair). */
     @Override
     public boolean onUnbind(Intent intent) {
+        stopLogcatKeyReader();
         if (running == this) running = null;
         RemoteKeys.release(this);
         if (repairRecord && !steppingOut) ServiceRepair.disconnected(this, getClass());
         return super.onUnbind(intent);
     }
 
+    private long lastMicRedirectTime = 0;
+
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+        // Remap the remote's mic/voice-search button (which opens Google Assistant) to Wi-Fi settings.
+        CharSequence pkg = event.getPackageName();
+        if (pkg != null && "com.google.android.katniss".contentEquals(pkg)) {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastMicRedirectTime > 2000) {
+                lastMicRedirectTime = now;
+                try {
+                    startActivity(SystemSettings.intent(this, Settings.ACTION_WIFI_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP));
+                } catch (Exception ignored) {}
+            }
+        }
         // app_keys "front:" entries: only activities count, so a toast or the volume bar doesn't change the app in front.
         if ((!frontAppKeys.isEmpty() || !frontAppScancodes.isEmpty())
                 && event.getPackageName() != null && event.getClassName() != null) {
@@ -467,6 +584,19 @@ public class HomeKeyService extends AccessibilityService {
         ResolveInfo home = getPackageManager().resolveActivity(
                 new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY);
         return home != null && stockHomePackage.equals(home.activityInfo.packageName);
+    }
+
+    /** True for the remote's Power button, which TCL's window manager swallows instead of acting on. */
+    static boolean isPowerKey(int keyCode, int scanCode) {
+        return keyCode == KeyEvent.KEYCODE_POWER || scanCode == 116;
+    }
+
+    /** The global action to perform for a Power press while the display is awake, or 0 while it is asleep. */
+    static int powerKeyGlobalAction(boolean displayInteractive, int sdk) {
+        if (!displayInteractive) return 0;
+        return sdk >= Build.VERSION_CODES.P
+                ? AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN
+                : AccessibilityService.GLOBAL_ACTION_POWER_DIALOG;
     }
 
     @Override
