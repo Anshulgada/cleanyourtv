@@ -28,6 +28,11 @@ import java.util.concurrent.Executors;
 public final class PushToTvServer {
     private static final String TAG = "PushToTvServer";
     public static final int PORT = 8080;
+    private static volatile PushToTvServer instance;
+
+    public static PushToTvServer getInstance() {
+        return instance;
+    }
 
     public interface PushToTvListener {
         void onOpenUrl(String url, String mode, String title);
@@ -54,6 +59,7 @@ public final class PushToTvServer {
     public PushToTvServer(Context context, PushToTvListener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
+        instance = this;
     }
 
     public synchronized void start() {
@@ -89,6 +95,7 @@ public final class PushToTvServer {
         }
     }
 
+    @android.annotation.SuppressLint("ResourceType")
     private void handleClient(Socket client) {
         try (client;
              BufferedReader reader = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
@@ -176,30 +183,45 @@ public final class PushToTvServer {
             } else if (path.startsWith("/api/stremio/hibernate")) {
                 boolean success = listener != null && listener.onHibernateStremio();
                 sendResponse(out, 200, "application/json", "{\"status\":\"ok\",\"hibernated\":" + success + "}");
+            } else if (path.startsWith("/api/debug/pgrep")) {
+                StringBuilder sb = new StringBuilder();
+                try {
+                    Process p = Runtime.getRuntime().exec(new String[]{"pgrep", "-f", "com.stremio.one"});
+                    java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()));
+                    String line;
+                    while ((line = r.readLine()) != null) sb.append(line).append("\\n");
+                    r.close();
+                    p.waitFor();
+                } catch (Exception e) {
+                    sb.append("ERR: ").append(e.getMessage());
+                }
+                Log.i(TAG, "debug pgrep result: " + sb.toString().replace("\\n", " "));
+                sendResponse(out, 200, "text/plain", sb.toString());
             } else if (path.startsWith("/api/stremio/status")) {
                 boolean running = listener != null && listener.isStremioRunning();
                 long sec = listener != null ? listener.getStremioRemainingSeconds() : 0;
                 sendResponse(out, 200, "application/json", "{\"running\":" + running + ",\"remainingSec\":" + sec + "}");
+            } else if (path.startsWith("/api/stremio/refresh")) {
+                executor.execute(() -> MediaShelfManager.refreshStremioContinueWatching(context));
+                sendResponse(out, 200, "application/json", "{\"refreshed\":true}");
             } else if (path.startsWith("/api/stremio/sync?")) {
                 String rawKey = extractParam(path, "authKey=");
                 String authKey = URLDecoder.decode(rawKey, "UTF-8");
-                executor.execute(() -> {
-                    boolean success = MediaShelfManager.syncStremioCloud(context, authKey);
-                    mainHandler.post(() -> {
-                        if (listener != null) listener.onShelfUpdated();
-                    });
+                boolean success = MediaShelfManager.syncStremioCloud(context, authKey);
+                mainHandler.post(() -> {
+                    if (listener != null) listener.onShelfUpdated();
                 });
-                sendResponse(out, 200, "application/json", "{\"status\":\"ok\"}");
+                sendResponse(out, 200, "application/json", "{\"status\":\"" + (success ? "ok" : "fail") + "\"}");
             } else if (path.startsWith("/api/stremio/login?")) {
                 String email = URLDecoder.decode(extractParam(path, "email="), "UTF-8");
                 String pass = URLDecoder.decode(extractParam(path, "pass="), "UTF-8");
-                executor.execute(() -> {
-                    boolean success = MediaShelfManager.loginAndSyncStremio(context, email, pass);
-                    mainHandler.post(() -> {
-                        if (listener != null) listener.onShelfUpdated();
-                    });
+                Log.i(TAG, "stremio login attempt: " + email);
+                boolean success = MediaShelfManager.loginAndSyncStremio(context, email, pass);
+                Log.i(TAG, "stremio login result: " + success);
+                mainHandler.post(() -> {
+                    if (listener != null) listener.onShelfUpdated();
                 });
-                sendResponse(out, 200, "application/json", "{\"status\":\"ok\"}");
+                sendResponse(out, 200, "application/json", "{\"status\":\"" + (success ? "ok" : "fail") + "\"}");
             } else if (path.startsWith("/api/shelves/toggle_order")) {
                 boolean target = true;
                 if (listener != null) {
@@ -218,6 +240,10 @@ public final class PushToTvServer {
                             android.content.Intent launch = context.getPackageManager().getLaunchIntentForPackage(pkg);
                             if (launch != null) {
                                 launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                                if (pkg != null && pkg.contains("stremio")) {
+                                    StremioWatchdog wd = StremioWatchdog.getRunning();
+                                    if (wd != null) wd.markLaunched();
+                                }
                                 context.startActivity(launch);
                             }
                         } catch (Exception ignored) {}
@@ -283,7 +309,7 @@ public final class PushToTvServer {
             case "PAUSE": return KeyEvent.KEYCODE_MEDIA_PAUSE;
             case "REWIND": return KeyEvent.KEYCODE_MEDIA_REWIND;
             case "FAST_FORWARD": return KeyEvent.KEYCODE_MEDIA_FAST_FORWARD;
-            case "POWER": return KeyEvent.KEYCODE_POWER;
+            case "POWER": return KeyEvent.KEYCODE_SLEEP;
             default: return 0;
         }
     }
@@ -309,7 +335,7 @@ public final class PushToTvServer {
     private void registerNsdService() {
         try {
             NsdServiceInfo serviceInfo = new NsdServiceInfo();
-            serviceInfo.setServiceName("CleanYourTV");
+            serviceInfo.setServiceName("tcl-tv");
             serviceInfo.setServiceType("_http._tcp.");
             serviceInfo.setPort(PORT);
 
@@ -343,21 +369,28 @@ public final class PushToTvServer {
 
     public String getDeviceIp() {
         try {
-            WifiManager wm = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
-            if (wm != null && wm.getConnectionInfo() != null && wm.getConnectionInfo().getIpAddress() != 0) {
-                return Formatter.formatIpAddress(wm.getConnectionInfo().getIpAddress());
-            }
-            List<NetworkInterface> interfaces = Collections.list(NetworkInterface.getNetworkInterfaces());
-            for (NetworkInterface intf : interfaces) {
-                List<InetAddress> addrs = Collections.list(intf.getInetAddresses());
-                for (InetAddress addr : addrs) {
-                    if (!addr.isLoopbackAddress() && addr.getHostAddress().indexOf(':') < 0) {
+            NetworkInterface wlan = NetworkInterface.getByName("wlan0");
+            if (wlan != null) {
+                for (InetAddress addr : Collections.list(wlan.getInetAddresses())) {
+                    if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
                         return addr.getHostAddress();
                     }
                 }
             }
+            List<NetworkInterface> interfaces = Collections.list(NetworkInterface.getNetworkInterfaces());
+            for (NetworkInterface intf : interfaces) {
+                for (InetAddress addr : Collections.list(intf.getInetAddresses())) {
+                    if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+            WifiManager wm = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && wm.getConnectionInfo() != null && wm.getConnectionInfo().getIpAddress() != 0) {
+                return Formatter.formatIpAddress(wm.getConnectionInfo().getIpAddress());
+            }
         } catch (Exception ignored) {}
-        return "192.168.1.5";
+        return "192.168.29.89";
     }
 
     public boolean isTvBroInstalled() {
@@ -429,14 +462,14 @@ public final class PushToTvServer {
                 + "      min-height: 100vh; display: flex; flex-direction: column; align-items: center;\n"
                 + "      padding: max(16px, env(safe-area-inset-top)) 14px max(32px, env(safe-area-inset-bottom));\n"
                 + "    }\n"
-                + "    .remote-wrap { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 14px; }\n"
+                + "    .remote-wrap { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 12px; }\n"
                 + "    .card {\n"
                 + "      background: rgba(22, 27, 34, 0.88); backdrop-filter: blur(28px); -webkit-backdrop-filter: blur(28px);\n"
-                + "      border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 22px; padding: 18px;\n"
-                + "      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55);\n"
+                + "      border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; padding: 14px 16px;\n"
+                + "      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);\n"
                 + "    }\n"
-                + "    .header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }\n"
-                + "    .title { font-size: 1.15rem; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; }\n"
+                + "    .header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }\n"
+                + "    .title { font-size: 1.12rem; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; }\n"
                 + "    .title img { width: 26px; height: 26px; border-radius: 6px; }\n"
                 + "    .badge-live { font-size: 0.72rem; padding: 3px 8px; border-radius: 12px; background: #238636; color: #fff; font-weight: 600; letter-spacing: 0.03em; }\n"
                 + "    .pwa-banner {\n"
@@ -446,9 +479,9 @@ public final class PushToTvServer {
                 + "    /* Physical Remote Style */\n"
                 + "    .remote-chassis {\n"
                 + "      background: linear-gradient(180deg, rgba(30, 36, 48, 0.95), rgba(18, 22, 30, 0.98));\n"
-                + "      border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 28px; padding: 20px 16px;\n"
+                + "      border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 26px; padding: 18px 14px;\n"
                 + "    }\n"
-                + "    .top-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }\n"
+                + "    .top-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }\n"
                 + "    .r-btn {\n"
                 + "      background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12);\n"
                 + "      border-radius: 14px; padding: 10px; color: #fff; font-weight: 600; font-size: 0.88rem;\n"
@@ -459,30 +492,41 @@ public final class PushToTvServer {
                 + "    .r-btn.power { background: rgba(248, 81, 73, 0.2); border-color: rgba(248, 81, 73, 0.4); color: #ff7b72; }\n"
                 + "    /* Circular Tactical D-Pad */\n"
                 + "    .dpad-disk {\n"
-                + "      width: 210px; height: 210px; margin: 6px auto 18px; position: relative;\n"
+                + "      width: 216px; height: 216px; margin: 4px auto 16px; position: relative;\n"
                 + "      background: rgba(255, 255, 255, 0.04); border: 2px solid rgba(255, 255, 255, 0.12);\n"
                 + "      border-radius: 50%; box-shadow: inset 0 2px 8px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.5);\n"
+                + "      touch-action: manipulation; user-select: none; -webkit-user-select: none;\n"
                 + "    }\n"
                 + "    .dp-dir {\n"
                 + "      position: absolute; display: flex; align-items: center; justify-content: center;\n"
-                + "      color: #fff; font-size: 1.3rem; font-weight: bold; cursor: pointer;\n"
+                + "      color: #fff; font-size: 1.35rem; font-weight: bold; cursor: pointer;\n"
+                + "      touch-action: manipulation; -webkit-tap-highlight-color: transparent;\n"
+                + "      user-select: none; -webkit-user-select: none;\n"
+                + "      background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08);\n"
+                + "      transition: background 0.12s, color 0.12s, transform 0.08s;\n"
                 + "    }\n"
-                + "    .dp-dir:active { color: #58a6ff; transform: scale(0.95); }\n"
-                + "    .dp-up { top: 6px; left: 50%; transform: translateX(-50%); width: 70px; height: 50px; }\n"
-                + "    .dp-down { bottom: 6px; left: 50%; transform: translateX(-50%); width: 70px; height: 50px; }\n"
-                + "    .dp-left { left: 6px; top: 50%; transform: translateY(-50%); width: 50px; height: 70px; }\n"
-                + "    .dp-right { right: 6px; top: 50%; transform: translateY(-50%); width: 50px; height: 70px; }\n"
+                + "    .dp-up { top: 8px; left: 50%; transform: translateX(-50%); width: 78px; height: 48px; border-radius: 18px 18px 8px 8px; }\n"
+                + "    .dp-up:active { transform: translateX(-50%) scale(0.92); background: rgba(88, 166, 255, 0.28); color: #58a6ff; }\n"
+                + "    .dp-down { bottom: 8px; left: 50%; transform: translateX(-50%); width: 78px; height: 48px; border-radius: 8px 8px 18px 18px; }\n"
+                + "    .dp-down:active { transform: translateX(-50%) scale(0.92); background: rgba(88, 166, 255, 0.28); color: #58a6ff; }\n"
+                + "    .dp-left { left: 8px; top: 50%; transform: translateY(-50%); width: 48px; height: 78px; border-radius: 18px 8px 8px 18px; }\n"
+                + "    .dp-left:active { transform: translateY(-50%) scale(0.92); background: rgba(88, 166, 255, 0.28); color: #58a6ff; }\n"
+                + "    .dp-right { right: 8px; top: 50%; transform: translateY(-50%); width: 48px; height: 78px; border-radius: 8px 18px 18px 8px; }\n"
+                + "    .dp-right:active { transform: translateY(-50%) scale(0.92); background: rgba(88, 166, 255, 0.28); color: #58a6ff; }\n"
                 + "    .dp-ok {\n"
                 + "      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);\n"
                 + "      width: 82px; height: 82px; border-radius: 50%;\n"
                 + "      background: linear-gradient(135deg, #1f6feb, #0a84ff); border: 2px solid rgba(255, 255, 255, 0.25);\n"
-                + "      color: #fff; font-weight: 800; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;\n"
-                + "      box-shadow: 0 4px 14px rgba(10, 132, 255, 0.45); cursor: pointer;\n"
+                + "      color: #fff; font-weight: 800; font-size: 1.15rem; display: flex; align-items: center; justify-content: center;\n"
+                + "      box-shadow: 0 4px 16px rgba(10, 132, 255, 0.45); cursor: pointer;\n"
+                + "      touch-action: manipulation; -webkit-tap-highlight-color: transparent;\n"
+                + "      user-select: none; -webkit-user-select: none;\n"
+                + "      transition: transform 0.08s, box-shadow 0.12s;\n"
                 + "    }\n"
-                + "    .dp-ok:active { transform: translate(-50%, -50%) scale(0.92); opacity: 0.9; }\n"
+                + "    .dp-ok:active { transform: translate(-50%, -50%) scale(0.92); box-shadow: 0 2px 8px rgba(10, 132, 255, 0.25); opacity: 0.9; }\n"
                 + "    /* Navigation Cluster */\n"
-                + "    .nav-cluster { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }\n"
-                + "    .rocker-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }\n"
+                + "    .nav-cluster { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }\n"
+                + "    .rocker-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }\n"
                 + "    .rocker-box { display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.25); padding: 8px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); }\n"
                 + "    .rocker-lbl { font-size: 0.72rem; color: #8b949e; text-align: center; text-transform: uppercase; font-weight: 700; }\n"
                 + "    .media-cluster { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }\n"
@@ -494,62 +538,74 @@ public final class PushToTvServer {
                 + "    }\n"
                 + "    .app-chip:active { background: rgba(255,255,255,0.18); transform: scale(0.95); }\n"
                 + "    /* YouTube Feeds Manager */\n"
-                + "    .feed-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }\n"
+                + "    .feed-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }\n"
                 + "    .feed-tag {\n"
                 + "      display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 12px;\n"
                 + "      background: rgba(88, 166, 255, 0.15); border: 1px solid rgba(88, 166, 255, 0.3); color: #58a6ff; font-size: 0.8rem; font-weight: 600;\n"
                 + "    }\n"
-                + "    .feed-tag span.del { cursor: pointer; color: #f85149; font-weight: bold; padding: 0 2px; }\n"
+                + "    .feed-tag span.del { cursor: pointer; color: #f85149; font-weight: bold; padding: 0 4px; }\n"
                 + "    input[type=\"url\"], input[type=\"text\"], input[type=\"password\"] {\n"
-                + "      width: 100%; padding: 11px 13px; background: rgba(13, 17, 23, 0.95); border: 1px solid rgba(255, 255, 255, 0.14);\n"
-                + "      border-radius: 12px; color: #fff; font-size: 0.92rem; margin-bottom: 10px; outline: none;\n"
+                + "      width: 100%; padding: 10px 12px; background: rgba(13, 17, 23, 0.95); border: 1px solid rgba(255, 255, 255, 0.14);\n"
+                + "      border-radius: 12px; color: #fff; font-size: 0.90rem; margin-bottom: 8px; outline: none;\n"
                 + "    }\n"
                 + "    input:focus { border-color: #58a6ff; }\n"
                 + "    .btn {\n"
-                + "      display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 11px;\n"
-                + "      border-radius: 12px; font-size: 0.92rem; font-weight: 600; cursor: pointer; border: none;\n"
+                + "      display: inline-flex; align-items: center; justify-content: center; width: 100%; padding: 10px;\n"
+                + "      border-radius: 12px; font-size: 0.90rem; font-weight: 600; cursor: pointer; border: none;\n"
                 + "      transition: opacity 0.15s, transform 0.08s;\n"
                 + "    }\n"
                 + "    .btn:active { transform: scale(0.97); opacity: 0.85; }\n"
                 + "    .btn-primary { background: linear-gradient(135deg, #0a84ff, #238636); color: #fff; }\n"
                 + "    .btn-secondary { background: rgba(255, 255, 255, 0.09); color: #f0f6fc; border: 1px solid rgba(255, 255, 255, 0.1); margin-top: 6px; }\n"
                 + "    .btn-accent { background: #d29922; color: #000; font-weight: 700; }\n"
-                + "    .mode-select { display: flex; gap: 8px; margin-bottom: 10px; }\n"
+                + "    .mode-select { display: flex; gap: 8px; margin-bottom: 8px; }\n"
                 + "    .mode-chip {\n"
-                + "      flex: 1; padding: 7px; text-align: center; border-radius: 10px; font-size: 0.8rem; cursor: pointer;\n"
+                + "      flex: 1; padding: 6px; text-align: center; border-radius: 10px; font-size: 0.8rem; cursor: pointer;\n"
                 + "      background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); color: #8b949e;\n"
                 + "    }\n"
                 + "    .mode-chip.active { background: rgba(31, 111, 235, 0.35); border-color: #58a6ff; color: #fff; font-weight: 600; }\n"
                 + "    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #238636; color: #fff;\n"
                 + "      padding: 9px 18px; border-radius: 20px; font-size: 0.85rem; opacity: 0; pointer-events: none; transition: opacity 0.25s; z-index: 200; }\n"
                 + "    .toast.show { opacity: 1; }\n"
+                + "  .col-remote, .col-cards { display: flex; flex-direction: column; gap: 10px; width: 100%; }\n"
+                + "  @media (min-width: 900px) {\n"
+                + "    .remote-wrap { max-width: min(96vw, 1750px); display: grid; grid-template-columns: 320px 1.12fr 1fr; gap: 16px; align-items: start; }\n"
+                + "    .remote-chassis { max-width: 100%; }\n"
+                + "    .top-controls { gap: 10px; }\n"
+                + "    .r-btn { font-size: 0.92rem; padding: 10px; }\n"
+                + "    .dpad-disk { width: 230px; height: 230px; }\n"
+                + "    .nav-cluster { grid-template-columns: repeat(3, 1fr); }\n"
+                + "    .app-grid { grid-template-columns: repeat(3, 1fr); }\n"
+                + "    .media-cluster { grid-template-columns: repeat(3, 1fr); }\n"
+                + "  }\n"
                 + "  </style>\n"
                 + "</head>\n"
                 + "<body>\n"
                 + "  <div class=\"remote-wrap\">\n"
                 + "    <!-- PWA Install Banner -->\n"
-                + "    <div class=\"pwa-banner\" id=\"pwaBanner\" onclick=\"installPwa()\">📲 Add Remote App to Home Screen</div>\n"
+                + "    <div class=\"pwa-banner\" id=\"pwaBanner\" onclick=\"installPwa()\" style=\"grid-column: 1 / -1;\">📲 Add Remote App to Home Screen</div>\n"
                 + "\n"
-                + "    <!-- Physical TV Remote -->\n"
-                + "    <div class=\"remote-chassis\">\n"
-                + "      <div class=\"header-row\">\n"
-                + "        <div class=\"title\"><img src=\"/icon.png\" alt=\"Logo\">TV Remote</div>\n"
-                + "        <div class=\"badge-live\" id=\"statusBadge\">192.168.1.5</div>\n"
-                + "      </div>\n"
+                + "    <!-- COLUMN 1: Physical TV Remote -->\n"
+                + "    <div class=\"col-remote\">\n"
+                + "      <div class=\"remote-chassis\">\n"
+                + "        <div class=\"header-row\">\n"
+                + "          <div class=\"title\"><img src=\"/icon.png\" alt=\"Logo\">TV Remote</div>\n"
+                + "          <div class=\"badge-live\" id=\"statusBadge\">" + getDeviceIp() + "</div>\n"
+                + "        </div>\n"
                 + "\n"
                 + "      <div class=\"top-controls\">\n"
-                + "        <div class=\"r-btn power\" onclick=\"sendKey('POWER')\">⏻ Power</div>\n"
-                + "        <div class=\"r-btn\" onclick=\"sendKey('MUTE')\">🔇 Mute</div>\n"
-                + "        <div class=\"r-btn\" onclick=\"sendKey('SETTINGS')\">⚙ Settings</div>\n"
+                 + "        <div class=\"r-btn power\" onclick=\"sendKey('POWER')\">Power</div>\n"
+                 + "        <div class=\"r-btn\" onclick=\"sendKey('MUTE')\">Mute</div>\n"
+                 + "        <div class=\"r-btn\" onclick=\"sendKey('SETTINGS')\">Settings</div>\n"
                 + "      </div>\n"
                 + "\n"
                 + "      <!-- Tactile Circular D-Pad -->\n"
                 + "      <div class=\"dpad-disk\">\n"
-                + "        <div class=\"dp-dir dp-up\" onclick=\"sendKey('UP')\">▲</div>\n"
-                + "        <div class=\"dp-dir dp-left\" onclick=\"sendKey('LEFT')\">◀</div>\n"
+                + "        <div class=\"dp-dir dp-up\" onpointerdown=\"startKey('UP')\" onpointerup=\"endKey()\" onpointercancel=\"endKey()\" onpointerleave=\"endKey()\" onclick=\"sendKey('UP')\">▲</div>\n"
+                + "        <div class=\"dp-dir dp-left\" onpointerdown=\"startKey('LEFT')\" onpointerup=\"endKey()\" onpointercancel=\"endKey()\" onpointerleave=\"endKey()\" onclick=\"sendKey('LEFT')\">◀</div>\n"
                 + "        <div class=\"dp-ok\" onclick=\"sendKey('OK')\">OK</div>\n"
-                + "        <div class=\"dp-dir dp-right\" onclick=\"sendKey('RIGHT')\">▶</div>\n"
-                + "        <div class=\"dp-dir dp-down\" onclick=\"sendKey('DOWN')\">▼</div>\n"
+                + "        <div class=\"dp-dir dp-right\" onpointerdown=\"startKey('RIGHT')\" onpointerup=\"endKey()\" onpointercancel=\"endKey()\" onpointerleave=\"endKey()\" onclick=\"sendKey('RIGHT')\">▶</div>\n"
+                + "        <div class=\"dp-dir dp-down\" onpointerdown=\"startKey('DOWN')\" onpointerup=\"endKey()\" onpointercancel=\"endKey()\" onpointerleave=\"endKey()\" onclick=\"sendKey('DOWN')\">▼</div>\n"
                 + "      </div>\n"
                 + "\n"
                 + "      <!-- Navigation Cluster -->\n"
@@ -563,77 +619,84 @@ public final class PushToTvServer {
                 + "      <div class=\"rocker-row\">\n"
                 + "        <div class=\"rocker-box\">\n"
                 + "          <div class=\"rocker-lbl\">Volume</div>\n"
-                + "          <div class=\"r-btn\" onclick=\"sendKey('VOL_UP')\">Vol +</div>\n"
-                + "          <div class=\"r-btn\" onclick=\"sendKey('VOL_DOWN')\">Vol -</div>\n"
+                + "          <div class=\"r-btn\" onpointerdown=\"startKey('VOL_UP')\" onpointerup=\"endKey()\" onpointercancel=\"endKey()\" onpointerleave=\"endKey()\" onclick=\"sendKey('VOL_UP')\">Vol +</div>\n"
+                + "          <div class=\"r-btn\" onpointerdown=\"startKey('VOL_DOWN')\" onpointerup=\"endKey()\" onpointercancel=\"endKey()\" onpointerleave=\"endKey()\" onclick=\"sendKey('VOL_DOWN')\">Vol -</div>\n"
                 + "        </div>\n"
                 + "        <div class=\"rocker-box\">\n"
-                + "          <div class=\"rocker-lbl\">Type & Info</div>\n"
+                + "          <div class=\"rocker-lbl\">Type & Menu</div>\n"
                 + "          <div class=\"r-btn\" onclick=\"promptType()\">⌨ Type Text</div>\n"
-                + "          <div class=\"r-btn\" onclick=\"sendKey('PLAY_PAUSE')\">⏯ Play/Pause</div>\n"
+                + "          <div class=\"r-btn\" onclick=\"sendKey('MENU')\">☰ Info / Menu</div>\n"
                 + "        </div>\n"
                 + "      </div>\n"
                 + "\n"
                 + "      <!-- Media Controls -->\n"
                 + "      <div class=\"media-cluster\">\n"
                 + "        <div class=\"r-btn\" onclick=\"sendKey('REWIND')\">⏮ Rewind</div>\n"
-                + "        <div class=\"r-btn\" onclick=\"sendKey('PLAY_PAUSE')\">⏯ Toggle</div>\n"
+                + "        <div class=\"r-btn\" onclick=\"sendKey('PLAY_PAUSE')\">⏯ Play/Pause</div>\n"
                 + "        <div class=\"r-btn\" onclick=\"sendKey('FAST_FORWARD')\">⏭ Fwd</div>\n"
                 + "      </div>\n"
                 + "    </div>\n"
+                + "    </div>\n"
                 + "\n"
-                + "    <!-- Quick App Switcher -->\n"
-                + "    <div class=\"card\">\n"
-                + "      <div class=\"header-row\"><div class=\"title\">Quick Launch</div></div>\n"
-                + "      <div class=\"app-grid\">\n"
-                + "        <div class=\"app-chip\" onclick=\"launchApp('com.stremio.one')\">Stremio</div>\n"
-                + "        <div class=\"app-chip\" onclick=\"launchApp('org.smarttube.stable')\">SmartTube</div>\n"
-                + "        <div class=\"app-chip\" onclick=\"launchApp('com.phlox.tvwebbrowser')\">TV Bro</div>\n"
+                + "    <!-- COLUMN 2: Quick Launch, Dynamic YouTube, Push Link, Performance -->\n"
+                + "    <div class=\"col-cards\">\n"
+                + "      <!-- Quick App Switcher -->\n"
+                + "      <div class=\"card\">\n"
+                + "        <div class=\"header-row\"><div class=\"title\">Quick Launch</div></div>\n"
+                + "        <div class=\"app-grid\">\n"
+                + "          <div class=\"app-chip\" onclick=\"launchApp('com.stremio.one')\">Stremio</div>\n"
+                + "          <div class=\"app-chip\" onclick=\"launchApp('org.smarttube.stable')\">SmartTube</div>\n"
+                + "          <div class=\"app-chip\" onclick=\"launchApp('com.phlox.tvwebbrowser')\">TV Bro</div>\n"
+                + "        </div>\n"
+                + "      </div>\n"
+                + "\n"
+                + "      <!-- Dynamic YouTube Feeds -->\n"
+                + "      <div class=\"card\">\n"
+                + "        <div class=\"header-row\"><div class=\"title\">Dynamic YouTube Feeds</div></div>\n"
+                + "        <div style=\"font-size:0.78rem; color:#8b949e;\">Active channels & topics on TV home shelf:</div>\n"
+                + "        <div class=\"feed-tags\" id=\"feedTagsList\"></div>\n"
+                + "        <div style=\"display:flex; gap:6px;\">\n"
+                + "          <input type=\"text\" id=\"newFeedInput\" placeholder=\"e.g. @FCBarcelona, @mkbhd, trending\" style=\"margin-bottom:0;\" onkeydown=\"if(event.key==='Enter')addNewFeed()\">\n"
+                + "          <button class=\"btn btn-primary\" style=\"width:auto; padding:0 14px; white-space:nowrap;\" onclick=\"addNewFeed()\">+ Add</button>\n"
+                + "        </div>\n"
+                + "        <button class=\"btn btn-secondary\" style=\"margin-top:6px;\" onclick=\"refreshYtFeeds()\">↻ Refresh Dynamic Videos Now</button>\n"
+                + "      </div>\n"
+                + "\n"
+                + "      <!-- Push Stream Link to TV -->\n"
+                + "      <div class=\"card\">\n"
+                + "        <div class=\"header-row\"><div class=\"title\">Push Link to TV</div></div>\n"
+                + "        <div class=\"mode-select\">\n"
+                + "          <div class=\"mode-chip active\" id=\"modeTvBro\" onclick=\"setMode('tvbro')\">TV Bro (Ad-Block)</div>\n"
+                + "          <div class=\"mode-chip\" id=\"modeDirect\" onclick=\"setMode('direct')\">Direct Player</div>\n"
+                + "        </div>\n"
+                + "        <input type=\"url\" id=\"targetUrl\" placeholder=\"Paste match or stream URL...\" onkeydown=\"if(event.key==='Enter')beamUrl()\">\n"
+                + "        <button class=\"btn btn-primary\" onclick=\"beamUrl()\">Beam to TV Now</button>\n"
+                + "      </div>\n"
+                + "\n"
+                + "      <!-- TV Performance & Shelf Layout Order -->\n"
+                + "      <div class=\"card\">\n"
+                + "        <div class=\"header-row\"><div class=\"title\">TV Performance & Shelves</div></div>\n"
+                + "        <button class=\"btn btn-accent\" onclick=\"hibernateStremio()\">⚡ Free Stremio RAM (~160MB)</button>\n"
+                + "        <div style=\"font-size:0.78rem; color:#8b949e; margin:10px 0 6px;\" id=\"shelfSub\">Shelf Position: Below All Apps</div>\n"
+                + "        <button class=\"btn btn-secondary\" onclick=\"toggleShelfOrder()\">Toggle: Below Dock vs Below Apps</button>\n"
                 + "      </div>\n"
                 + "    </div>\n"
                 + "\n"
-                + "    <!-- TV Performance & Shelf Layout Order -->\n"
-                + "    <div class=\"card\">\n"
-                + "      <div class=\"header-row\"><div class=\"title\">TV Performance & Shelves</div></div>\n"
-                + "      <button class=\"btn btn-accent\" onclick=\"hibernateStremio()\">⚡ Free Stremio RAM (~160MB)</button>\n"
-                + "      <div style=\"font-size:0.8rem; color:#8b949e; margin:12px 0 6px;\" id=\"shelfSub\">Shelf Position: Below All Apps</div>\n"
-                + "      <button class=\"btn btn-secondary\" onclick=\"toggleShelfOrder()\">Toggle: Below Dock vs Below Apps</button>\n"
-                + "    </div>\n"
-                + "\n"
-                + "    <!-- Dynamic YouTube Feeds -->\n"
-                + "    <div class=\"card\">\n"
-                + "      <div class=\"header-row\"><div class=\"title\">Dynamic YouTube Feeds</div></div>\n"
-                + "      <div style=\"font-size:0.8rem; color:#8b949e;\">Active channels & topics on TV home shelf:</div>\n"
-                + "      <div class=\"feed-tags\" id=\"feedTagsList\"></div>\n"
-                + "      <div style=\"display:flex; gap:6px;\">\n"
-                + "        <input type=\"text\" id=\"newFeedInput\" placeholder=\"e.g. @FCBarcelona, @mkbhd, trending\" style=\"margin-bottom:0;\">\n"
-                + "        <button class=\"btn btn-primary\" style=\"width:auto; padding:0 16px; white-space:nowrap;\" onclick=\"addNewFeed()\">+ Add</button>\n"
+                + "    <!-- COLUMN 3: Stremio Continue Watching (Dedicated Tall Column) -->\n"
+                + "    <div class=\"col-cards\">\n"
+                + "      <div class=\"card\">\n"
+                + "        <div class=\"header-row\"><div class=\"title\">Stremio Continue Watching</div></div>\n"
+                + "        <div style=\"font-size:0.78rem; color:#8b949e; margin-bottom:8px;\">Sync real Stremio library to TV home shelf</div>\n"
+                + "        <input type=\"text\" id=\"stremioEmail\" placeholder=\"Stremio Email...\">\n"
+                + "        <input type=\"password\" id=\"stremioPass\" placeholder=\"Stremio Password...\" onkeydown=\"if(event.key==='Enter')loginStremio()\">\n"
+                + "        <button class=\"btn btn-primary\" onclick=\"loginStremio()\">Log In & Sync Shelf</button>\n"
+                + "        <div style=\"font-size:0.78rem; color:#8b949e; margin:12px 0 6px;\">Or manual AuthKey:</div>\n"
+                + "        <input type=\"text\" id=\"stremioKey\" placeholder=\"Paste AuthKey...\" style=\"width:100%; margin-bottom:8px;\" onkeydown=\"if(event.key==='Enter')syncStremioKey()\">\n"
+                + "        <div style=\"display:grid; grid-template-columns: 1fr 1fr; gap:8px;\">\n"
+                + "          <button class=\"btn btn-secondary\" style=\"margin-top:0;\" onclick=\"syncStremioKey()\">Sync AuthKey</button>\n"
+                + "          <button class=\"btn btn-secondary\" style=\"margin-top:0;\" onclick=\"refreshStremio()\">Refresh Continue Watching</button>\n"
+                + "        </div>\n"
                 + "      </div>\n"
-                + "      <button class=\"btn btn-secondary\" style=\"margin-top:8px;\" onclick=\"refreshYtFeeds()\">↻ Refresh Dynamic Videos Now</button>\n"
-                + "    </div>\n"
-                + "\n"
-                + "    <!-- Stremio Continue Watching -->\n"
-                + "    <div class=\"card\">\n"
-                + "      <div class=\"header-row\"><div class=\"title\">Stremio Continue Watching</div></div>\n"
-                + "      <div style=\"font-size:0.8rem; color:#8b949e; margin-bottom:10px;\">Sync real Stremio library to TV home shelf</div>\n"
-                + "      <input type=\"text\" id=\"stremioEmail\" placeholder=\"Stremio Email...\">\n"
-                + "      <input type=\"password\" id=\"stremioPass\" placeholder=\"Stremio Password...\">\n"
-                + "      <button class=\"btn btn-primary\" onclick=\"loginStremio()\">Log In & Sync Shelf</button>\n"
-                + "      <div style=\"font-size:0.8rem; color:#8b949e; margin:10px 0 6px;\">Or manual AuthKey:</div>\n"
-                + "      <div style=\"display:flex; gap:6px;\">\n"
-                + "        <input type=\"text\" id=\"stremioKey\" placeholder=\"Paste AuthKey...\" style=\"margin-bottom:0;\">\n"
-                + "        <button class=\"btn btn-secondary\" style=\"width:auto; padding:0 16px; white-space:nowrap; margin-top:0;\" onclick=\"syncStremioKey()\">Sync</button>\n"
-                + "      </div>\n"
-                + "    </div>\n"
-                + "\n"
-                + "    <!-- Push Stream Link to TV -->\n"
-                + "    <div class=\"card\">\n"
-                + "      <div class=\"header-row\"><div class=\"title\">Push Link to TV</div></div>\n"
-                + "      <div class=\"mode-select\">\n"
-                + "        <div class=\"mode-chip active\" id=\"modeTvBro\" onclick=\"setMode('tvbro')\">TV Bro (Ad-Block)</div>\n"
-                + "        <div class=\"mode-chip\" id=\"modeDirect\" onclick=\"setMode('direct')\">Direct Player</div>\n"
-                + "      </div>\n"
-                + "      <input type=\"url\" id=\"targetUrl\" placeholder=\"Paste match or stream URL...\">\n"
-                + "      <button class=\"btn btn-primary\" onclick=\"beamUrl()\">Beam to TV Now</button>\n"
                 + "    </div>\n"
                 + "  </div>\n"
                 + "\n"
@@ -669,12 +732,26 @@ public final class PushToTvServer {
                 + "      t.textContent = msg; t.className = 'toast show';\n"
                 + "      setTimeout(() => t.className = 'toast', 2400);\n"
                 + "    }\n"
+                + "    let repeatTimer = null;\n"
+                + "    let repeatInterval = null;\n"
                 + "    function sendKey(code) {\n"
-                + "      navigator.vibrate && navigator.vibrate(20);\n"
+                + "      if (navigator.vibrate) try { navigator.vibrate(20); } catch(e){}\n"
                 + "      fetch('/api/key?code=' + code);\n"
                 + "    }\n"
+                + "    function startKey(code) {\n"
+                + "      sendKey(code);\n"
+                + "      clearTimeout(repeatTimer);\n"
+                + "      clearInterval(repeatInterval);\n"
+                + "      repeatTimer = setTimeout(() => {\n"
+                + "        repeatInterval = setInterval(() => { sendKey(code); }, 120);\n"
+                + "      }, 350);\n"
+                + "    }\n"
+                + "    function endKey() {\n"
+                + "      clearTimeout(repeatTimer);\n"
+                + "      clearInterval(repeatInterval);\n"
+                + "    }\n"
                 + "    function launchApp(pkg) {\n"
-                + "      navigator.vibrate && navigator.vibrate(20);\n"
+                + "      if (navigator.vibrate) try { navigator.vibrate(20); } catch(e){}\n"
                 + "      fetch('/api/open_app?pkg=' + encodeURIComponent(pkg))\n"
                 + "        .then(() => showToast('Launching app...'))\n"
                 + "        .catch(e => showToast('Error: ' + e));\n"
@@ -686,7 +763,7 @@ public final class PushToTvServer {
                 + "    function beamUrl() {\n"
                 + "      const url = document.getElementById('targetUrl').value.trim();\n"
                 + "      if (!url) { showToast('Please enter a URL'); return; }\n"
-                + "      fetch('/api/open?url=' + encodeURIComponent(url) + '&mode=' + currentMode)\n"
+                + "      fetch('/api/open?mode=' + currentMode + '&url=' + encodeURIComponent(url))\n"
                 + "        .then(r => r.json())\n"
                 + "        .then(() => showToast('Beamed to TV!'))\n"
                 + "        .catch(e => showToast('Failed: ' + e));\n"
@@ -723,7 +800,12 @@ public final class PushToTvServer {
                 + "          feeds.forEach(f => {\n"
                 + "            const tag = document.createElement('div');\n"
                 + "            tag.className = 'feed-tag';\n"
-                + "            tag.innerHTML = f + ' <span class=\"del\" onclick=\"removeFeed(\\'' + f + '\\')\">✕</span>';\n"
+                + "            tag.textContent = f + ' ';\n"
+                + "            const del = document.createElement('span');\n"
+                + "            del.className = 'del';\n"
+                + "            del.textContent = '✕';\n"
+                + "            del.onclick = () => removeFeed(f);\n"
+                + "            tag.appendChild(del);\n"
                 + "            box.appendChild(tag);\n"
                 + "          });\n"
                 + "        });\n"
@@ -758,7 +840,7 @@ public final class PushToTvServer {
                 + "      showToast('Logging in and syncing...');\n"
                 + "      fetch('/api/stremio/login?email=' + encodeURIComponent(email) + '&pass=' + encodeURIComponent(pass))\n"
                 + "        .then(r => r.json())\n"
-                + "        .then(() => showToast('Stremio library synced!'))\n"
+                + "        .then(d => showToast(d.status === 'ok' ? 'Stremio library synced!' : 'Login failed'))\n"
                 + "        .catch(e => showToast('Login failed: ' + e));\n"
                 + "    }\n"
                 + "    function syncStremioKey() {\n"
@@ -770,6 +852,7 @@ public final class PushToTvServer {
                 + "        .then(() => showToast('Continue Watching synced!'))\n"
                 + "        .catch(e => showToast('Sync failed: ' + e));\n"
                 + "    }\n"
+                + "    function refreshStremio() { showToast('Refreshing Continue Watching...'); fetch('/api/stremio/refresh').then(() => showToast('Continue Watching refreshed!')).catch(e => showToast('Refresh failed: ' + e)); }\n"
                 + "    updateShelfStatus();\n"
                 + "    loadYtFeeds();\n"
                 + "    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');\n"

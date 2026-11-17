@@ -59,6 +59,7 @@ import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -132,9 +133,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private long settingsRevision;
     /** Idle time on Home before ClockActivity; 0 is off (config.xml, home_idle_clock_minutes). */
     private long idleClockMs;
-    /** Back on Home opens ClockActivity (config.xml, back_opens_clock). */
+    /** Back on Home opens screensaver (config.xml, back_opens_clock). */
     private boolean backOpensClock;
-    private final Runnable showIdleClock = () -> startActivity(new Intent(this, ClockActivity.class));
+    private final Runnable showIdleClock = this::launchScreensaver;
     private String liveTvAction;
     private String liveTvInputId;
     /** The app library is on (config.xml, app_library): only then can the tile menu take an app off Home. */
@@ -894,11 +895,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             ((TextView) btnSettings).setText(R.string.launcher_settings);
             ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_home_settings_pill, 0, 0, 0);
         }
-        btnSettings.setOnClickListener(v -> {
-            if (launcherSettingsButton) startActivityForResult(
-                    new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST);
-            else open(systemIntent(Settings.ACTION_SETTINGS));
-        });
+        btnSettings.setOnClickListener(v -> open(systemIntent(Settings.ACTION_SETTINGS)));
         btnReorder = findViewById(R.id.btnReorder);
         btnReorder.setOnClickListener(v -> toggleReorder());
         btnReorder.setVisibility(cfg.reorderButton ? View.VISIBLE : View.GONE);
@@ -961,12 +958,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // Keep focus on the top bar at its ends and at the top: Android's focus finder would otherwise
         // jump to a tile far below when there is nothing in that direction.
         boolean rtlMenuBar = getResources().getBoolean(R.bool.rtl_menu_bar);
+        LinearLayout topButtonsView = findViewById(R.id.topButtons);
+        LinearLayout secondaryButtonsView = findViewById(R.id.secondaryButtons);
+
         View.OnKeyListener pillKeys = (v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
             if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                if (btnRam != null && btnRam.getVisibility() == View.VISIBLE) {
-                    btnRam.requestFocus();
+                View closest = findClosestPill(v, secondaryButtonsView);
+                if (closest != null) {
+                    closest.requestFocus();
                     return true;
                 }
                 // Back to the dock tile Up came from, not wherever the focus finder lands.
@@ -983,12 +984,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         View.OnKeyListener secondaryPillKeys = (v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                if (btnInputs != null && btnInputs.getVisibility() == View.VISIBLE) {
-                    btnInputs.requestFocus();
-                } else if (btnCast != null) {
-                    btnCast.requestFocus();
-                } else {
+                View closest = findClosestPill(v, topButtonsView);
+                if (closest != null) {
+                    closest.requestFocus();
+                    return true;
+                }
+                if (btnSettings != null) {
                     btnSettings.requestFocus();
+                    return true;
                 }
                 return true;
             }
@@ -1041,6 +1044,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         updateBarcelonaFixture();
 
         stremioWatchdog = new StremioWatchdog(this);
+        MediaShelfManager.initObservers(this);
+        MediaShelfManager.refreshSmartTubeFeedAsync(this);
         pushToTvServer = new PushToTvServer(this, new PushToTvServer.PushToTvListener() {
             @Override
             public void onOpenUrl(String url, String mode, String title) {
@@ -1054,7 +1059,24 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
             @Override
             public void onTypeText(String text) {
-                Toast.makeText(MainActivity.this, "Remote text: " + text, Toast.LENGTH_SHORT).show();
+                if (text == null || text.isEmpty()) return;
+                runOnUiThread(() -> {
+                    View focus = getCurrentFocus();
+                    if (focus instanceof android.widget.EditText) {
+                        ((android.widget.EditText) focus).append(text);
+                    } else {
+                        try {
+                            android.view.KeyCharacterMap kcm = android.view.KeyCharacterMap.load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD);
+                            KeyEvent[] events = kcm.getEvents(text.toCharArray());
+                            if (events != null) {
+                                for (KeyEvent ev : events) {
+                                    getWindow().superDispatchKeyEvent(ev);
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                    Toast.makeText(MainActivity.this, "Remote text: " + text, Toast.LENGTH_SHORT).show();
+                });
             }
 
             @Override
@@ -1260,6 +1282,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onResume() {
         super.onResume();
         resumed = true;
+        // Returning from the TCL screensaver (a dream) leaves the TCL speaker HAL muted (app.ui.sk); nudge the
+        // audio service and restart the HAL so sound comes back without the user having to touch a volume key.
+        try {
+            android.media.AudioManager am = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+            if (am != null) {
+                int vol = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC);
+                am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, vol, 0);
+            }
+        } catch (Exception ignored) {}
+        try {
+            Runtime.getRuntime().exec("setprop sys.audio.restart.hal 1");
+        } catch (Exception ignored) {}
         // A festival that started or ended while Home was in the background: rebuild with or without it.
         if (festive != festival.active(LocalDate.now())) {
             recreate();
@@ -1591,8 +1625,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * nothing even on Home.
      */
     private boolean handleSettingsKey(KeyEvent event) {
-        for (int code : settingsKeycodes) {
-            if (event.getKeyCode() != code) continue;
+        int kc = event.getKeyCode();
+        boolean match = (kc == KeyEvent.KEYCODE_SETTINGS || kc == KeyEvent.KEYCODE_NOTIFICATION
+                || kc == 83 || kc == 176 || kc == 4077 || kc == 304 || kc == 268);
+        if (!match) {
+            for (int code : settingsKeycodes) {
+                if (kc == code) {
+                    match = true;
+                    break;
+                }
+            }
+        }
+        if (match) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
                 Intent settings = settingsKeyPanel ? new Intent(this, QuickSettingsActivity.class)
                         : systemIntent(Settings.ACTION_SETTINGS);
@@ -1621,8 +1665,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (homeIgnoreChannelKeys && RemoteKeys.isChannelKey(event.getKeyCode())) return true;
         int eventKeyCode = event.getKeyCode();
-        if (eventKeyCode == KeyEvent.KEYCODE_POWER || eventKeyCode == KeyEvent.KEYCODE_SLEEP
-                || eventKeyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
+        // Remap the remote's mic/voice-search button to Wi-Fi settings directly.
+        if (eventKeyCode == KeyEvent.KEYCODE_VOICE_ASSIST || eventKeyCode == KeyEvent.KEYCODE_SEARCH
+                || eventKeyCode == KeyEvent.KEYCODE_ASSIST) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                try {
+                    startActivity(SystemSettings.intent(this, Settings.ACTION_WIFI_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (Exception ignored) {}
+            }
+            return true;
+        }
+        if (eventKeyCode == KeyEvent.KEYCODE_POWER || eventKeyCode == KeyEvent.KEYCODE_SLEEP || eventKeyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
                 putTvToSleep();
             }
@@ -1967,7 +2021,28 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
         // Home screen: Back goes nowhere, unless back_opens_clock is on.
-        if (backOpensClock) startActivity(new Intent(this, ClockActivity.class));
+        if (backOpensClock) launchScreensaver();
+    }
+
+    private void launchScreensaver() {
+        try {
+            Intent somnambulator = new Intent(Intent.ACTION_MAIN);
+            somnambulator.setClassName("com.android.systemui", "com.android.systemui.Somnambulator");
+            somnambulator.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(somnambulator);
+            return;
+        } catch (Exception ignored) {}
+        try {
+            Intent aerial = getPackageManager().getLaunchIntentForPackage("com.neilturner.aerialviews");
+            if (aerial != null) {
+                aerial.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(aerial);
+                return;
+            }
+        } catch (Exception ignored) {}
+        try {
+            startActivity(new Intent(this, ClockActivity.class));
+        } catch (Exception ignored) {}
     }
 
     // ---- glass highlight -------------------------------------------------------------------------
@@ -2663,15 +2738,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     return col == 0;
                 } else {
                     if (col + span >= COLUMNS) return true;
-                    if (position < COLUMNS && position == adapter.dockFilled() - 1) return true;
                     if (position == count - 1) return true;
-                    if (position + 1 < count && glm.getSpanSizeLookup().getSpanIndex(position + 1, COLUMNS) == 0) return true;
                     return false;
                 }
             }
-            // In the dock, the last app is the row's end: the empty slots after it take no focus.
-            int rowCount = position < COLUMNS ? Math.min(count, adapter.dockFilled()) : count;
-            return GridNavigation.atHorizontalEdge(position, rowCount, COLUMNS,
+            return GridNavigation.atHorizontalEdge(position, count, COLUMNS,
                     rtlAppGrid, keyCode == KeyEvent.KEYCODE_DPAD_LEFT);
         }
         if (adapter.isShelvesAboveApps()) {
@@ -2953,9 +3024,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
 
         if (shelfIndex == 0) {
-            if (adapter.isLibraryAt(adapter.appCount())) {
-                focusLibrary();
-            } else if (adapter.appCount() > 0) {
+            if (adapter.appCount() > 0) {
                 int lastRow = ((adapter.appCount() - 1) / COLUMNS) * COLUMNS;
                 focusTile(Math.min(lastRow + (lastFocused % COLUMNS), adapter.appCount() - 1));
             } else {
@@ -2964,6 +3033,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         } else if (shelfIndex == 1) {
             int stremioPos = adapter.getStremioPosition();
             if (stremioPos != -1) focusShelf(stremioPos);
+            else if (adapter.appCount() > 0) {
+                int lastRow = ((adapter.appCount() - 1) / COLUMNS) * COLUMNS;
+                focusTile(Math.min(lastRow + (lastFocused % COLUMNS), adapter.appCount() - 1));
+            } else {
+                firstTopButton().requestFocus();
+            }
         }
     }
 
@@ -2987,6 +3062,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             int smartTubePos = adapter.getSmartTubePosition();
             if (smartTubePos != -1) {
                 focusShelf(smartTubePos);
+            } else if (adapter.getLibraryPosition() != -1) {
+                focusLibrary();
+            }
+        } else if (shelfIndex == 1) {
+            if (adapter.getLibraryPosition() != -1) {
+                focusLibrary();
             }
         }
     }
@@ -3006,34 +3087,59 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         cancelPendingFocusScroll();
         hideGlass();
         hideHero();
-        RecyclerView.ViewHolder holder = grid.findViewHolderForAdapterPosition(shelfPos);
-        if (holder instanceof AppAdapter.ShelfViewHolder) {
-            AppAdapter.ShelfViewHolder svh = (AppAdapter.ShelfViewHolder) holder;
+        if (applyShelfFocus(shelfPos)) return;
+
+        pendingFocusScroll = new RecyclerView.OnScrollListener() {
+            @Override public void onScrollStateChanged(@NonNull RecyclerView rv, int state) {
+                if (state != RecyclerView.SCROLL_STATE_IDLE) return;
+                rv.removeOnScrollListener(this);
+                if (pendingFocusScroll != this) return;
+                pendingFocusScroll = null;
+                applyShelfFocus(shelfPos);
+            }
+        };
+        grid.addOnScrollListener(pendingFocusScroll);
+
+        if (grid.getLayoutManager() instanceof androidx.recyclerview.widget.LinearLayoutManager) {
+            ((androidx.recyclerview.widget.LinearLayoutManager) grid.getLayoutManager()).scrollToPositionWithOffset(shelfPos, 0);
+        } else {
+            grid.scrollToPosition(shelfPos);
+        }
+
+        grid.post(() -> {
+            if (!applyShelfFocus(shelfPos)) {
+                grid.postDelayed(() -> applyShelfFocus(shelfPos), 60);
+                grid.postDelayed(() -> applyShelfFocus(shelfPos), 150);
+            }
+        });
+    }
+
+    private boolean applyShelfFocus(int shelfPos) {
+        if (grid == null) return false;
+        RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(shelfPos);
+        if (vh instanceof AppAdapter.ShelfViewHolder) {
+            AppAdapter.ShelfViewHolder svh = (AppAdapter.ShelfViewHolder) vh;
             if (svh.recycler.getChildCount() > 0) {
                 View firstChild = svh.recycler.getChildAt(0);
-                View target = firstChild.findViewById(R.id.cardContainer);
-                if (target != null) {
-                    target.requestFocus();
-                    return;
+                View target = firstChild != null ? firstChild.findViewById(R.id.cardContainer) : null;
+                if (target != null && target.requestFocus()) {
+                    cancelPendingFocusScroll();
+                    return true;
                 }
             }
-        }
-        grid.smoothScrollToPosition(shelfPos);
-        grid.postDelayed(() -> {
-            RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(shelfPos);
-            if (vh instanceof AppAdapter.ShelfViewHolder) {
-                AppAdapter.ShelfViewHolder svh = (AppAdapter.ShelfViewHolder) vh;
+            if (svh.recycler.requestFocus()) {
+                cancelPendingFocusScroll();
+            }
+            svh.recycler.post(() -> {
                 if (svh.recycler.getChildCount() > 0) {
-                    View firstChild = svh.recycler.getChildAt(0);
-                    View target = firstChild.findViewById(R.id.cardContainer);
-                    if (target != null) {
-                        target.requestFocus();
-                        return;
-                    }
+                    View fc = svh.recycler.getChildAt(0);
+                    View t = fc != null ? fc.findViewById(R.id.cardContainer) : null;
+                    if (t != null) t.requestFocus();
                 }
-                svh.recycler.requestFocus();
-            }
-        }, 80);
+            });
+            return true;
+        }
+        return false;
     }
 
     private void focusLibrary() {
@@ -3833,7 +3939,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         header.addView(title);
         panel.addView(header);
 
-        String ip = pushToTvServer != null ? pushToTvServer.getDeviceIp() : "192.168.1.5";
+        String ip = pushToTvServer != null ? pushToTvServer.getDeviceIp() : "192.168.29.89";
         String url = "http://" + ip + ":" + PushToTvServer.PORT;
 
         // Centered QR Code Card: MARGIN=0 in generator makes modules take full space with tight 5dp padding
@@ -3965,6 +4071,31 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         } catch (Exception ignored) {}
     }
 
+    private View findClosestPill(View source, ViewGroup targetGroup) {
+        if (source == null || targetGroup == null || targetGroup.getVisibility() != View.VISIBLE) return null;
+        int[] srcLoc = new int[2];
+        source.getLocationOnScreen(srcLoc);
+        int srcCenterX = srcLoc[0] + source.getWidth() / 2;
+
+        View closest = null;
+        int minDistance = Integer.MAX_VALUE;
+        int[] targetLoc = new int[2];
+
+        for (int i = 0; i < targetGroup.getChildCount(); i++) {
+            View child = targetGroup.getChildAt(i);
+            if (child.getVisibility() == View.VISIBLE && child.isFocusable()) {
+                child.getLocationOnScreen(targetLoc);
+                int childCenterX = targetLoc[0] + child.getWidth() / 2;
+                int dist = Math.abs(srcCenterX - childCenterX);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closest = child;
+                }
+            }
+        }
+        return closest;
+    }
+
     private void purgeRam() {
         try {
             ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
@@ -3972,18 +4103,26 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 ActivityManager.MemoryInfo before = new ActivityManager.MemoryInfo();
                 am.getMemoryInfo(before);
 
+                onTrimMemory(TRIM_MEMORY_COMPLETE);
                 am.killBackgroundProcesses("com.stremio.one");
                 am.killBackgroundProcesses("org.smarttube.stable");
                 am.killBackgroundProcesses("com.phlox.tvwebbrowser");
                 System.gc();
 
-                ActivityManager.MemoryInfo after = new ActivityManager.MemoryInfo();
-                am.getMemoryInfo(after);
-                long freedMb = (after.availMem - before.availMem) / (1024 * 1024);
-                if (freedMb <= 0) freedMb = 168;
-
-                updateRamUsage();
-                Toast.makeText(this, "⚡ Turbo Clean: +" + freedMb + " MB RAM Freed!", Toast.LENGTH_SHORT).show();
+                handler.postDelayed(() -> {
+                    try {
+                        ActivityManager.MemoryInfo after = new ActivityManager.MemoryInfo();
+                        am.getMemoryInfo(after);
+                        long freedMb = (after.availMem - before.availMem) / (1024 * 1024);
+                        updateRamUsage();
+                        if (freedMb > 0) {
+                            Toast.makeText(MainActivity.this, "⚡ Turbo Clean: +" + freedMb + " MB RAM Freed!", Toast.LENGTH_SHORT).show();
+                        } else {
+                            long availMb = after.availMem / (1024 * 1024);
+                            Toast.makeText(MainActivity.this, "⚡ RAM Optimized: " + availMb + " MB Available", Toast.LENGTH_SHORT).show();
+                        }
+                    } catch (Exception ignored) {}
+                }, 350L);
             }
         } catch (Exception e) {
             Toast.makeText(this, "⚡ RAM Purged!", Toast.LENGTH_SHORT).show();
@@ -4070,19 +4209,20 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     }
 
     public void putTvToSleep() {
-        android.accessibilityservice.AccessibilityService service = HomeKeyService.getRunning();
-        if (service == null) service = InputKeyService.getRunning();
-        if (service != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                if (service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)) return;
-            }
-            service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_POWER_DIALOG);
-            return;
-        }
         try {
+            HomeKeyService hs = HomeKeyService.getRunning();
+            if (hs != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                hs.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN);
+            }
+        } catch (Exception ignored) {}
+        try {
+            sendBroadcast(new Intent("android.intent.action.ACTION_PANEL_POWER_OFF"));
+            sendBroadcast(new Intent("com.skyworth.tv.action.STANDBY"));
             sendBroadcast(new Intent("com.tcl.action.standby"));
             sendBroadcast(new Intent("com.tcl.action.sleep"));
-            sendBroadcast(new Intent(Intent.ACTION_SCREEN_OFF));
+        } catch (Exception ignored) {}
+        try {
+            Runtime.getRuntime().exec(new String[]{"input", "keyevent", "223"});
         } catch (Exception ignored) {}
     }
 
@@ -4094,7 +4234,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 return;
             }
             android.media.AudioManager am = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_REWIND
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) {
+                if (am != null) {
+                    long now = SystemClock.uptimeMillis();
+                    am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0));
+                    am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0));
+                }
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
                 if (am != null) {
                     am.adjustSuggestedStreamVolume(android.media.AudioManager.ADJUST_RAISE,
                             android.media.AudioManager.USE_DEFAULT_STREAM_TYPE,
@@ -4120,9 +4271,24 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 }
                 return;
             } else if (keyCode == KeyEvent.KEYCODE_BACK) {
-                runOnUiThread(this::onBackPressed);
+                HomeKeyService hs = HomeKeyService.getRunning();
+                if (hs != null) {
+                    hs.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK);
+                } else {
+                    runOnUiThread(this::onBackPressed);
+                }
                 return;
             } else if (keyCode == KeyEvent.KEYCODE_HOME) {
+                HomeKeyService hs = HomeKeyService.getRunning();
+                if (hs != null) {
+                    hs.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME);
+                }
+                try {
+                    Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+                    homeIntent.addCategory(Intent.CATEGORY_HOME);
+                    homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(homeIntent);
+                } catch (Exception ignored) {}
                 runOnUiThread(() -> {
                     if (openPopup != null && openPopup.isShowing()) openPopup.dismiss();
                     if (grid != null) {
@@ -4177,7 +4343,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 boolean handled = getWindow().superDispatchKeyEvent(down);
                 getWindow().superDispatchKeyEvent(up);
 
-                if (!handled && focus != null) {
+                if (!handled && focus != null && (keyCode == KeyEvent.KEYCODE_DPAD_UP
+                        || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                        || keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                        || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)) {
                     int direction = View.FOCUS_DOWN;
                     if (keyCode == KeyEvent.KEYCODE_DPAD_UP) direction = View.FOCUS_UP;
                     else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) direction = View.FOCUS_LEFT;
@@ -4276,6 +4445,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private void open(Intent i) {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
+            if (stremioWatchdog != null && i.getPackage() != null
+                    && i.getPackage().contains("stremio")) {
+                stremioWatchdog.markLaunched();
+            }
             startActivity(i);
         } catch (ActivityNotFoundException | SecurityException e) {
             Toast.makeText(this, R.string.not_available, Toast.LENGTH_SHORT).show();
