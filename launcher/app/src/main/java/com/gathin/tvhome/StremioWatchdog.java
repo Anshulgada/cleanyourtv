@@ -16,7 +16,9 @@ public final class StremioWatchdog {
 
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private static volatile StremioWatchdog running;
     private boolean timerRunning = false;
+    private boolean stremioRunning = false;
     private long stremioDetectedAt = 0;
     private Runnable onHibernateListener;
 
@@ -30,6 +32,11 @@ public final class StremioWatchdog {
 
     public StremioWatchdog(Context context) {
         this.context = context.getApplicationContext();
+        running = this;
+    }
+
+    public static StremioWatchdog getRunning() {
+        return running;
     }
 
     public void setOnHibernateListener(Runnable listener) {
@@ -38,7 +45,7 @@ public final class StremioWatchdog {
 
     public synchronized void onHomeResumed() {
         MediaShelfManager.snapshotStremioState(context);
-        if (isStremioRunning()) {
+        if (stremioRunning) {
             if (!timerRunning) {
                 stremioDetectedAt = System.currentTimeMillis();
                 timerRunning = true;
@@ -47,6 +54,16 @@ public final class StremioWatchdog {
             }
         } else {
             cancelTimer();
+        }
+    }
+
+    public synchronized void markLaunched() {
+        stremioRunning = true;
+        if (!timerRunning) {
+            stremioDetectedAt = System.currentTimeMillis();
+            timerRunning = true;
+            handler.postDelayed(killRunnable, INACTIVITY_LIMIT_MS);
+            Log.i(TAG, "Stremio launched. 60-minute auto-hibernate timer armed.");
         }
     }
 
@@ -63,20 +80,7 @@ public final class StremioWatchdog {
     }
 
     public boolean isStremioRunning() {
-        try {
-            ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) return false;
-            List<ActivityManager.RunningAppProcessInfo> procs = am.getRunningAppProcesses();
-            if (procs == null) return false;
-            for (ActivityManager.RunningAppProcessInfo info : procs) {
-                if (info.processName != null && info.processName.contains(PACKAGE_STREMIO)) {
-                    return true;
-                }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "Process check error: " + e.getMessage());
-        }
-        return false;
+        return stremioRunning;
     }
 
     public synchronized boolean hibernateStremio() {
@@ -85,6 +89,7 @@ public final class StremioWatchdog {
             ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
             if (am != null) {
                 am.killBackgroundProcesses(PACKAGE_STREMIO);
+                stremioRunning = false;
                 timerRunning = false;
                 handler.removeCallbacks(killRunnable);
                 Log.i(TAG, "Stremio background processes successfully killed. Reclaimed ~150-180 MB RAM.");

@@ -76,8 +76,8 @@ public final class BarcelonaLiveScoreManager {
      */
     public static void checkLiveScoreAsync(BarcelonaFixture fixture, ScoreCallback callback) {
         long now = System.currentTimeMillis();
-        // Cache for 2.5 seconds to avoid flooding network
-        if (now - lastFetchTime < 2500 && currentScore != null) {
+        long minInterval = (currentScore != null && currentScore.isLive) ? 1000L : 2500L;
+        if (now - lastFetchTime < minInterval && currentScore != null) {
             if (callback != null) callback.onScoreUpdated(currentScore);
             return;
         }

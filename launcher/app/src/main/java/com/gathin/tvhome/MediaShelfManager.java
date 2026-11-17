@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -60,6 +61,7 @@ public class MediaShelfManager {
         if (shelfListener != null) MAIN_HANDLER.post(shelfListener::onShelfUpdated);
     }
     private static long lastRefreshTime = 0;
+    private static long lastStremioRefreshTime = 0;
     public static long getLastRefreshTime() { return lastRefreshTime; }
     public static void refreshSmartTubeFeedAsync(Context ctx) {
         EXECUTOR.execute(() -> refreshSmartTubeFeed(ctx));
@@ -82,26 +84,154 @@ public class MediaShelfManager {
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
     private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
     private static final LruCache<String, Bitmap> BITMAP_CACHE = new LruCache<>(40);
+    private static volatile boolean observerRegistered = false;
+    private static volatile boolean stremioRefreshing = false;
+
+    public static void initObservers(Context ctx) {
+        if (observerRegistered || ctx == null) return;
+        try {
+            Context appCtx = ctx.getApplicationContext();
+            Uri uri = Uri.parse("content://android.media.tv/watch_next_program");
+            appCtx.getContentResolver().registerContentObserver(uri, true, new ContentObserver(MAIN_HANDLER) {
+                @Override
+                public void onChange(boolean selfChange) {
+                    super.onChange(selfChange);
+                    Log.i(TAG, "watch_next_program updated, syncing continue watching...");
+                    EXECUTOR.execute(() -> refreshStremioContinueWatching(appCtx));
+                }
+            });
+            observerRegistered = true;
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to register watch_next observer", e);
+        }
+    }
 
     /**
      * Retrieves Stremio continue watching items from local disk snapshot cache.
-     * Guaranteed to return populated items even when Stremio is dead/hibernated.
+     * Triggers dynamic background query from Android TV system database & Stremio cloud.
      */
     public static List<MediaShelfItem> getStremioContinueWatching(Context ctx) {
+        initObservers(ctx);
         List<MediaShelfItem> list = loadCachedItems(ctx, STREMIO_CACHE_FILE);
         if (list.isEmpty()) {
-            list = getDefaultStremioItems();
-            saveCachedItems(ctx, STREMIO_CACHE_FILE, list);
+            list.add(new MediaShelfItem(
+                "stremio_link_card",
+                "Link Stremio Account",
+                "Open phone remote at http://" + (PushToTvServer.getInstance() != null ? PushToTvServer.getInstance().getDeviceIp() : "192.168.29.89") + ":8080 to sync your Continue Watching in 1 click",
+                "",
+                0,
+                "https://web.stremio.com",
+                "com.stremio.one",
+                false
+            ));
         }
 
-        // Background auto-sync if user has entered an authKey
-        SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String authKey = prefs.getString(PREF_STREMIO_AUTH_KEY, null);
-        if (authKey != null && !authKey.isEmpty()) {
-            EXECUTOR.execute(() -> syncStremioCloud(ctx, authKey));
+        // Trigger dynamic refresh from Android TV system database & Stremio cloud (guarded against re-entrancy / loops)
+        long now = System.currentTimeMillis();
+        if (!stremioRefreshing && now - lastStremioRefreshTime > 10_000L) {
+            lastStremioRefreshTime = now;
+            EXECUTOR.execute(() -> refreshStremioContinueWatching(ctx));
         }
 
         return list;
+    }
+
+    public static void refreshStremioContinueWatching(Context ctx) {
+        if (ctx == null) return;
+        if (stremioRefreshing) return;
+        stremioRefreshing = true;
+        lastStremioRefreshTime = System.currentTimeMillis();
+        try {
+            List<MediaShelfItem> fresh = new ArrayList<>();
+            queryWatchNextPrograms(ctx, fresh);
+            if (!fresh.isEmpty()) {
+                saveCachedItems(ctx, STREMIO_CACHE_FILE, fresh);
+                Log.i(TAG, "Dynamic Continue Watching updated with " + fresh.size() + " real items.");
+                notifyUpdate();
+                return;
+            }
+
+            // If local system watch_next has not yet been populated, check cloud if authKey exists
+            SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String authKey = prefs.getString(PREF_STREMIO_AUTH_KEY, null);
+            if (authKey != null && !authKey.isEmpty()) {
+                syncStremioCloud(ctx, authKey);
+            }
+        } finally {
+            stremioRefreshing = false;
+        }
+    }
+
+    private static void queryWatchNextPrograms(Context ctx, List<MediaShelfItem> out) {
+        try {
+            Uri uri = Uri.parse("content://android.media.tv/watch_next_program");
+            String[] projection = {
+                "_id", "package_name", "title", "episode_title",
+                "season_display_number", "episode_display_number",
+                "poster_art_uri", "intent_uri", "last_playback_position_millis",
+                "duration_millis", "last_engagement_time_utc_millis"
+            };
+            Cursor cursor = ctx.getContentResolver().query(
+                uri, projection, null, null, "last_engagement_time_utc_millis DESC");
+            if (cursor != null) {
+                int idIdx = cursor.getColumnIndex("_id");
+                int pkgIdx = cursor.getColumnIndex("package_name");
+                int titleIdx = cursor.getColumnIndex("title");
+                int epTitleIdx = cursor.getColumnIndex("episode_title");
+                int seasonIdx = cursor.getColumnIndex("season_display_number");
+                int epNumIdx = cursor.getColumnIndex("episode_display_number");
+                int posterIdx = cursor.getColumnIndex("poster_art_uri");
+                int intentIdx = cursor.getColumnIndex("intent_uri");
+                int posIdx = cursor.getColumnIndex("last_playback_position_millis");
+                int durIdx = cursor.getColumnIndex("duration_millis");
+
+                while (cursor.moveToNext()) {
+                    String pkg = pkgIdx >= 0 ? cursor.getString(pkgIdx) : "";
+                    String intent = intentIdx >= 0 ? cursor.getString(intentIdx) : "";
+                    // Strictly enforce Stremio only (com.stremio.one); reject all other services (including NetMirror)
+                    if ((pkg != null && !pkg.isEmpty() && !"com.stremio.one".equals(pkg))
+                            || (intent != null && !intent.isEmpty() && !intent.toLowerCase().contains("stremio"))) {
+                        continue;
+                    }
+
+                    String title = titleIdx >= 0 ? cursor.getString(titleIdx) : "";
+                    if (title == null || title.isEmpty()) continue;
+
+                    String poster = posterIdx >= 0 ? cursor.getString(posterIdx) : "";
+                    long pos = posIdx >= 0 ? cursor.getLong(posIdx) : 0;
+                    long dur = durIdx >= 0 ? cursor.getLong(durIdx) : 0;
+                    long id = idIdx >= 0 ? cursor.getLong(idIdx) : System.currentTimeMillis();
+
+                    int progress = 0;
+                    if (dur > 0 && pos > 0) {
+                        int pct = (int) ((pos * 100L) / dur);
+                        if (pct >= 95) continue; // Completed / finished watching
+                        progress = Math.max(3, Math.min(92, pct));
+                    }
+
+                    String sNum = seasonIdx >= 0 ? cursor.getString(seasonIdx) : null;
+                    String eNum = epNumIdx >= 0 ? cursor.getString(epNumIdx) : null;
+                    String epTitle = epTitleIdx >= 0 ? cursor.getString(epTitleIdx) : null;
+
+                    String sub;
+                    if (sNum != null && !sNum.isEmpty() && eNum != null && !eNum.isEmpty()) {
+                        sub = "S" + sNum + " • E" + eNum;
+                    } else if (epTitle != null && !epTitle.isEmpty()) {
+                        sub = epTitle;
+                    } else {
+                        sub = "Resume Movie";
+                    }
+
+                    out.add(new MediaShelfItem(
+                        "wn_" + id, title, sub, poster, progress, intent,
+                        (pkg != null && !pkg.isEmpty()) ? pkg : "com.stremio.one", false
+                    ));
+                }
+                cursor.close();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Watch next query failed", e);
+        }
     }
 
     /**
@@ -120,6 +250,7 @@ public class MediaShelfManager {
             conn.setReadTimeout(6000);
 
             JSONObject body = new JSONObject();
+            body.put("type", "Login");
             body.put("email", email.trim());
             body.put("password", password);
 
@@ -136,8 +267,10 @@ public class MediaShelfManager {
 
                 JSONObject res = new JSONObject(sb.toString());
                 JSONObject result = res.optJSONObject("result");
+                Log.i(TAG, "login result obj null? " + (result == null));
                 if (result != null) {
                     String authKey = result.optString("authKey", "");
+                    Log.i(TAG, "login authKey empty? " + authKey.isEmpty());
                     if (!authKey.isEmpty()) {
                         return syncStremioCloud(ctx, authKey);
                     }
@@ -183,13 +316,14 @@ public class MediaShelfManager {
                 JSONArray result = res.optJSONArray("result");
                 if (result != null) {
                     List<MediaShelfItem> fresh = new ArrayList<>();
-                    for (int i = 0; i < result.length() && fresh.size() < 12; i++) {
+                    for (int i = 0; i < result.length(); i++) {
                         JSONObject item = result.getJSONObject(i);
-                        if (item.optBoolean("removed", false)) continue;
+                        boolean removed = item.optBoolean("removed", false);
                         JSONObject state = item.optJSONObject("state");
                         if (state == null) continue;
                         long timeOffset = state.optLong("timeOffset", 0);
                         long duration = state.optLong("duration", 0);
+                        // Only skip completed/removed entries; keep in-progress watch history even if removed/temp.
                         if (timeOffset <= 0) continue;
 
                         String id = item.optString("_id", "");
@@ -242,6 +376,7 @@ public class MediaShelfManager {
                         }
                         fresh.add(new MediaShelfItem(id, name, sub, poster, progress, uri, "com.stremio.one", false));
                     }
+                    Log.i(TAG, "syncStremioCloud parsed result items: " + result.length() + " fresh: " + fresh.size());
                     if (!fresh.isEmpty()) {
                         saveCachedItems(ctx, STREMIO_CACHE_FILE, fresh);
                         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -249,6 +384,8 @@ public class MediaShelfManager {
                         Log.i(TAG, "Successfully synced " + fresh.size() + " items from Stremio cloud.");
                         notifyUpdate();
                         return true;
+                    } else {
+                        Log.w(TAG, "syncStremioCloud got 0 fresh items from cloud library");
                     }
                 }
             }
@@ -274,11 +411,8 @@ public class MediaShelfManager {
         if (list.isEmpty()) {
             list = getDefaultSmartTubeItems();
             saveCachedItems(ctx, SMARTTUBE_CACHE_FILE, list);
+            refreshSmartTubeFeedAsync(ctx);
         }
-
-        // Trigger asynchronous background refresh of dynamic YouTube channels
-        EXECUTOR.execute(() -> refreshSmartTubeFeed(ctx));
-
         return list;
     }
 
@@ -382,63 +516,107 @@ public class MediaShelfManager {
         } catch (Exception ignored) {}
     }
 
+    // SmartTube rotating feed slots, auto-rotating every 30 minutes
+    private static final String[] SMARTTUBE_FEED_SLOTS = {
+        "%20",          // Home Screen Recommendations from user's SmartTube
+        "trending",     // Latest Trending
+        "new",          // Latest New Uploads
+        "subscriptions",// Subscriptions Feed
+        "barca",        // Barça Match Highlights
+        "popular"       // Popular Videos
+    };
+
     /**
-     * Fetches dynamic video highlights from official YouTube Atom feeds and Leanback recommendations.
-     * Periodically rotates across diverse categories (Barça, Tech, Science, Trending, Entertainment)
-     * and interleaves items so the shelf always stays fresh and varied.
+     * Fetches dynamic video highlights directly from the user's SmartTube installation on the TV.
+     * Queries SmartTube's native VideoContentProvider for home screen recommendations and rotating feeds.
+     * Auto-rotates content every 30 minutes without needing arbitrary external YouTube searches.
      */
     public static void refreshSmartTubeFeed(Context ctx) {
         lastRefreshTime = System.currentTimeMillis();
         List<MediaShelfItem> dynamicItems = new ArrayList<>();
         java.util.Set<String> seenIds = new java.util.HashSet<>();
 
-        // 1. Query Android TV Leanback preview programs if available
+        // 1. Query Android TV Leanback preview programs if published
         queryLeanbackPreviewPrograms(ctx, dynamicItems);
         for (MediaShelfItem item : dynamicItems) seenIds.add(item.id);
 
-        // 2. Select rotating feeds from category pools based on 20-minute epoch window
-        int timeSlot = (int) ((System.currentTimeMillis() / (20 * 60 * 1000L)) & 0x7FFFFFFF);
-        List<String> targetFeeds = new ArrayList<>();
+        // 2. Query SmartTube's native VideoContentProvider on the TV
+        // Rotating slots based on 30-minute epoch window
+        int timeSlot = (int) ((System.currentTimeMillis() / (30 * 60 * 1000L)) & 0x7FFFFFFF);
+        String currentSlot = SMARTTUBE_FEED_SLOTS[timeSlot % SMARTTUBE_FEED_SLOTS.length];
 
-        // Add user-defined custom feeds first
+        // Always fetch user's home screen recommendations first
+        querySmartTubeContentProvider(ctx, "%20", dynamicItems, seenIds);
+
+        // Interleave rotating 30-minute slot if distinct from home
+        if (!"%20".equals(currentSlot) && dynamicItems.size() < 12) {
+            querySmartTubeContentProvider(ctx, currentSlot, dynamicItems, seenIds);
+        }
+
+        // Add user-defined custom feeds if any
         List<String> customFeeds = getCustomFeeds(ctx);
         for (String cf : customFeeds) {
-            if (!targetFeeds.contains(cf)) targetFeeds.add(cf);
-        }
-
-        // Pick one rotating channel from each category pool
-        for (int i = 0; i < CATEGORY_POOLS.length; i++) {
-            String[] pool = CATEGORY_POOLS[i];
-            int pick = (timeSlot + i) % pool.length;
-            String feed = pool[pick];
-            if (!targetFeeds.contains(feed)) targetFeeds.add(feed);
-        }
-
-        // Collect items per feed and interleave them
-        List<List<MediaShelfItem>> perFeedLists = new ArrayList<>();
-        for (String feed : targetFeeds) {
-            List<MediaShelfItem> feedItems = new ArrayList<>();
-            fetchFeedItems(feed, feedItems, seenIds);
-            if (!feedItems.isEmpty()) {
-                perFeedLists.add(feedItems);
-            }
-        }
-
-        // Interleave across categories: 1st of each, then 2nd of each
-        int maxLen = 0;
-        for (List<MediaShelfItem> l : perFeedLists) if (l.size() > maxLen) maxLen = l.size();
-        for (int round = 0; round < maxLen && dynamicItems.size() < 12; round++) {
-            for (List<MediaShelfItem> l : perFeedLists) {
-                if (round < l.size() && dynamicItems.size() < 12) {
-                    dynamicItems.add(l.get(round));
-                }
-            }
+            if (dynamicItems.size() >= 12) break;
+            querySmartTubeContentProvider(ctx, cf, dynamicItems, seenIds);
         }
 
         if (!dynamicItems.isEmpty()) {
             saveCachedItems(ctx, SMARTTUBE_CACHE_FILE, dynamicItems);
-            Log.i(TAG, "SmartTube dynamic feed refreshed with " + dynamicItems.size() + " videos.");
+            Log.i(TAG, "SmartTube dynamic feed refreshed with " + dynamicItems.size() + " videos from TV home screen.");
             notifyUpdate();
+        }
+    }
+
+    private static void querySmartTubeContentProvider(Context ctx, String query, List<MediaShelfItem> out, java.util.Set<String> seenIds) {
+        if (ctx == null) return;
+        try {
+            String q;
+            if (query == null || query.trim().isEmpty() || "%20".equals(query) || " ".equals(query)) {
+                q = "%20";
+            } else {
+                q = Uri.encode(query);
+            }
+            Uri uri = Uri.parse("content://org.smarttube.stable/search/search_suggest_query/" + q);
+            Cursor cursor = ctx.getContentResolver().query(uri, null, null, null, null);
+            if (cursor != null) {
+                int idIdx = cursor.getColumnIndex("_id");
+                int titleIdx = cursor.getColumnIndex("suggest_text_1");
+                int subIdx = cursor.getColumnIndex("suggest_text_2");
+                int imgIdx = cursor.getColumnIndex("suggest_result_card_image");
+                int count = 0;
+
+                while (cursor.moveToNext() && count < 8 && out.size() < 12) {
+                    String title = titleIdx >= 0 ? cursor.getString(titleIdx) : null;
+                    if (title == null || title.isEmpty() || "NULL".equalsIgnoreCase(title)) continue;
+
+                    String sub = subIdx >= 0 ? cursor.getString(subIdx) : "SmartTube";
+                    String img = imgIdx >= 0 ? cursor.getString(imgIdx) : null;
+                    long id = idIdx >= 0 ? cursor.getLong(idIdx) : System.currentTimeMillis();
+
+                    String videoId = null;
+                    if (img != null && img.contains("/vi/")) {
+                        int vi = img.indexOf("/vi/") + 4;
+                        int end = img.indexOf("/", vi);
+                        if (end > vi && end - vi == 11) {
+                            videoId = img.substring(vi, end);
+                        }
+                    }
+                    if (videoId == null) videoId = String.valueOf(id);
+
+                    if (seenIds.contains("st_" + videoId)) continue;
+                    seenIds.add("st_" + videoId);
+
+                    String intent = "https://www.youtube.com/watch?v=" + videoId;
+                    out.add(new MediaShelfItem(
+                        "st_" + videoId, title, sub != null ? sub : "SmartTube",
+                        img != null ? img : "", 0, intent, "org.smarttube.stable", true
+                    ));
+                    count++;
+                }
+                cursor.close();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "SmartTube content provider query failed: " + e.getMessage());
         }
     }
 
@@ -542,6 +720,10 @@ public class MediaShelfManager {
                 Intent launch = ctx.getPackageManager().getLaunchIntentForPackage(item.targetPackage);
                 if (launch != null) {
                     launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (item.targetPackage.contains("stremio")) {
+                        StremioWatchdog wd = StremioWatchdog.getRunning();
+                        if (wd != null) wd.markLaunched();
+                    }
                     ctx.startActivity(launch);
                     return;
                 }
