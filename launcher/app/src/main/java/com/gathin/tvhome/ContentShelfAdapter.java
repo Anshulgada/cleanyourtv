@@ -107,7 +107,12 @@ public class ContentShelfAdapter extends RecyclerView.Adapter<ContentShelfAdapte
         holder.container.setOnClickListener(v -> MediaShelfManager.launchMediaItem(context, item));
 
         holder.container.setOnKeyListener((v, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                    || keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (event.getAction() == KeyEvent.ACTION_UP) return true;
+            }
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
                 if (listener != null) listener.onShelfUp(shelfIndex);
                 return true;
@@ -116,10 +121,76 @@ public class ContentShelfAdapter extends RecyclerView.Adapter<ContentShelfAdapte
                 if (listener != null) listener.onShelfDown(shelfIndex);
                 return true;
             }
-            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && holder.getBindingAdapterPosition() == 0) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                int pos = holder.getBindingAdapterPosition();
+                if (pos == RecyclerView.NO_POSITION) return true;
+                if (pos <= 0) {
+                    // Left boundary: lock focus on first item, never leak to top bar
+                    return true;
+                }
+                int prevPos = pos - 1;
+                View parent = (View) holder.itemView.getParent();
+                if (parent instanceof RecyclerView) {
+                    RecyclerView rv = (RecyclerView) parent;
+                    RecyclerView.ViewHolder pvh = rv.findViewHolderForAdapterPosition(prevPos);
+                    if (pvh != null && pvh.itemView != null) {
+                        View target = pvh.itemView.findViewById(R.id.cardContainer);
+                        if (target != null) {
+                            target.requestFocus();
+                            if (event.getRepeatCount() > 0) {
+                                rv.scrollToPosition(prevPos);
+                            } else {
+                                rv.smoothScrollToPosition(prevPos);
+                            }
+                            return true;
+                        }
+                    }
+                    rv.scrollToPosition(prevPos);
+                    holder.container.requestFocus();
+                    rv.post(() -> {
+                        RecyclerView.ViewHolder vh = rv.findViewHolderForAdapterPosition(prevPos);
+                        if (vh != null && vh.itemView != null) {
+                            View target = vh.itemView.findViewById(R.id.cardContainer);
+                            if (target != null) target.requestFocus();
+                        }
+                    });
+                }
                 return true;
             }
-            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && holder.getBindingAdapterPosition() == items.size() - 1) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                int pos = holder.getBindingAdapterPosition();
+                if (pos == RecyclerView.NO_POSITION) return true;
+                if (pos >= items.size() - 1) {
+                    // Right boundary: lock focus on last item, never leak to top bar
+                    return true;
+                }
+                int nextPos = pos + 1;
+                View parent = (View) holder.itemView.getParent();
+                if (parent instanceof RecyclerView) {
+                    RecyclerView rv = (RecyclerView) parent;
+                    RecyclerView.ViewHolder nvh = rv.findViewHolderForAdapterPosition(nextPos);
+                    if (nvh != null && nvh.itemView != null) {
+                        View target = nvh.itemView.findViewById(R.id.cardContainer);
+                        if (target != null) {
+                            target.requestFocus();
+                            if (event.getRepeatCount() > 0) {
+                                rv.scrollToPosition(nextPos);
+                            } else {
+                                rv.smoothScrollToPosition(nextPos);
+                            }
+                            return true;
+                        }
+                    }
+                    rv.scrollToPosition(nextPos);
+                    holder.container.requestFocus();
+                    rv.post(() -> {
+                        RecyclerView.ViewHolder vh = rv.findViewHolderForAdapterPosition(nextPos);
+                        if (vh != null && vh.itemView != null) {
+                            View target = vh.itemView.findViewById(R.id.cardContainer);
+                            if (target != null) target.requestFocus();
+                        }
+                    });
+                }
                 return true;
             }
             return false;

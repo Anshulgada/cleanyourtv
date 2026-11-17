@@ -59,8 +59,7 @@
             android:max="100"
             android:progress="0"
             android:visibility="gone"
-            android:progressTint="#00FF9D"
-            android:progressBackgroundTint="#4DFFFFFF" />
+            android:progressDrawable="@drawable/shelf_progress_drawable" />
 
         <!-- High-contrast focus border -->
         <View

@@ -252,7 +252,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.appBanners = cfg.appBanners;
         this.uniformTiles = cfg.uniformTiles;
         this.shelvesAboveApps = ctx.getSharedPreferences("cleanyourtv_shelf", Context.MODE_PRIVATE)
-                .getBoolean("shelves_above_apps", false);
+                .getBoolean("shelves_above_apps", true);
         // Tiles keep their identity across reload(), so a focused tile stays on its app instead of
         // its view being rebound to whatever app now sits in that slot.
         setHasStableIds(true);
@@ -600,6 +600,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             if (ctx.getPackageManager().resolveActivity(byAction, 0) != null) i = byAction;
         }
         try {
+            if (e.pkg != null && e.pkg.contains("stremio")) {
+                StremioWatchdog wd = StremioWatchdog.getRunning();
+                if (wd != null) wd.markLaunched();
+            }
             ctx.startActivity(i);
             if (cinematic) LastOpened.record(ctx, e.pkg);
             if (advancedEffects && !reducedMotion && ctx instanceof Activity) {
@@ -612,7 +616,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     private boolean showStremioShelf = true;
     private boolean showSmartTubeShelf = true;
-    private boolean shelvesAboveApps;
+    private boolean shelvesAboveApps = true;
 
     public boolean isShelvesAboveApps() {
         return shelvesAboveApps;
@@ -639,11 +643,58 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         return (showStremioShelf ? 1 : 0) + (showSmartTubeShelf ? 1 : 0);
     }
 
+    private RecyclerView parentRecycler;
+
+    @Override
+    public void onAttachedToRecyclerView(@NonNull RecyclerView recyclerView) {
+        super.onAttachedToRecyclerView(recyclerView);
+        parentRecycler = recyclerView;
+    }
+
+    @Override
+    public void onDetachedFromRecyclerView(@NonNull RecyclerView recyclerView) {
+        super.onDetachedFromRecyclerView(recyclerView);
+        parentRecycler = null;
+    }
+
     public void notifyShelvesChanged() {
         int stremioPos = getStremioPosition();
-        if (stremioPos != -1) notifyItemChanged(stremioPos);
+        if (stremioPos != -1) {
+            if (parentRecycler != null) {
+                RecyclerView.ViewHolder vh = parentRecycler.findViewHolderForAdapterPosition(stremioPos);
+                if (vh instanceof ShelfViewHolder) {
+                    ShelfViewHolder svh = (ShelfViewHolder) vh;
+                    if (svh.recycler.getAdapter() instanceof ContentShelfAdapter) {
+                        ((ContentShelfAdapter) svh.recycler.getAdapter()).updateItems(MediaShelfManager.getStremioContinueWatching(ctx));
+                    } else {
+                        notifyItemChanged(stremioPos);
+                    }
+                } else {
+                    notifyItemChanged(stremioPos);
+                }
+            } else {
+                notifyItemChanged(stremioPos);
+            }
+        }
         int smartTubePos = getSmartTubePosition();
-        if (smartTubePos != -1) notifyItemChanged(smartTubePos);
+        if (smartTubePos != -1) {
+            if (parentRecycler != null) {
+                RecyclerView.ViewHolder vh = parentRecycler.findViewHolderForAdapterPosition(smartTubePos);
+                if (vh instanceof ShelfViewHolder) {
+                    ShelfViewHolder svh = (ShelfViewHolder) vh;
+                    if (svh.recycler.getAdapter() instanceof ContentShelfAdapter) {
+                        ((ContentShelfAdapter) svh.recycler.getAdapter()).updateItems(MediaShelfManager.getSmartTubeFeed(ctx));
+                    } else {
+                        notifyItemChanged(smartTubePos);
+                    }
+                } else {
+                    notifyItemChanged(smartTubePos);
+                }
+            } else {
+                notifyItemChanged(smartTubePos);
+            }
+        }
+
     }
 
     public int getStremioPosition() {
@@ -760,8 +811,22 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             title = itemView.findViewById(R.id.shelfTitle);
             badge = itemView.findViewById(R.id.shelfBadge);
             recycler = itemView.findViewById(R.id.shelfRecycler);
-            recycler.setLayoutManager(new androidx.recyclerview.widget.LinearLayoutManager(
-                    itemView.getContext(), androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL, false));
+            recycler.setFocusable(false);
+            recycler.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+            androidx.recyclerview.widget.LinearLayoutManager lm = new androidx.recyclerview.widget.LinearLayoutManager(
+                    itemView.getContext(), androidx.recyclerview.widget.LinearLayoutManager.HORIZONTAL, false) {
+                @Override
+                protected int getExtraLayoutSpace(RecyclerView.State state) {
+                    return 5000;
+                }
+                @Override
+                protected void calculateExtraLayoutSpace(@NonNull RecyclerView.State state, @NonNull int[] extraLayoutSpace) {
+                    extraLayoutSpace[0] = 3000;
+                    extraLayoutSpace[1] = 5000;
+                }
+            };
+            recycler.setLayoutManager(lm);
+            recycler.setItemViewCacheSize(50);
             recycler.setNestedScrollingEnabled(false);
         }
     }
