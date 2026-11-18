@@ -47,7 +47,7 @@ public final class PushToTvServer {
     }
 
     private final Context context;
-    private final PushToTvListener listener;
+    private volatile PushToTvListener listener;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
@@ -62,11 +62,20 @@ public final class PushToTvServer {
         instance = this;
     }
 
+    /** Update the callback target when the Activity is recreated without restarting the server. */
+    public void updateListener(PushToTvListener newListener) {
+        this.listener = newListener;
+    }
+
     public synchronized void start() {
         if (isRunning) return;
         isRunning = true;
         executor.execute(this::runServer);
         registerNsdService();
+    }
+
+    public boolean isRunning() {
+        return isRunning;
     }
 
     public synchronized void stop() {
@@ -81,16 +90,21 @@ public final class PushToTvServer {
     }
 
     private void runServer() {
-        try {
-            serverSocket = new ServerSocket(PORT);
-            Log.i(TAG, "Push-to-TV & Web Remote daemon listening on port " + PORT);
-            while (isRunning) {
-                Socket client = serverSocket.accept();
-                executor.execute(() -> handleClient(client));
-            }
-        } catch (Exception e) {
-            if (isRunning) {
-                Log.e(TAG, "Server loop encountered error: " + e.getMessage());
+        while (isRunning) {
+            try {
+                serverSocket = new ServerSocket(PORT);
+                Log.i(TAG, "Push-to-TV & Web Remote daemon listening on port " + PORT);
+                while (isRunning) {
+                    Socket client = serverSocket.accept();
+                    executor.execute(() -> handleClient(client));
+                }
+            } catch (Exception e) {
+                if (isRunning) {
+                    Log.e(TAG, "Server loop error (will retry in 5s): " + e.getMessage());
+                    try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
+                    serverSocket = null;
+                    try { Thread.sleep(5000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                }
             }
         }
     }

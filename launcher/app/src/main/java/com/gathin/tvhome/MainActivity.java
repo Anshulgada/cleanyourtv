@@ -1046,7 +1046,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         stremioWatchdog = new StremioWatchdog(this);
         MediaShelfManager.initObservers(this);
         MediaShelfManager.refreshSmartTubeFeedAsync(this);
-        pushToTvServer = new PushToTvServer(this, new PushToTvServer.PushToTvListener() {
+        PushToTvServer.PushToTvListener webListener = new PushToTvServer.PushToTvListener() {
             @Override
             public void onOpenUrl(String url, String mode, String title) {
                 openUrlOnTv(url, mode, title);
@@ -1117,8 +1117,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             public boolean isShelvesAboveApps() {
                 return adapter != null && adapter.isShelvesAboveApps();
             }
-        });
-        pushToTvServer.start();
+        };
+        // Keep the web server alive across Activity recreations: reuse the existing singleton if already running.
+        PushToTvServer existing = PushToTvServer.getInstance();
+        if (existing != null && existing.isRunning()) {
+            existing.updateListener(webListener);
+            pushToTvServer = existing;
+        } else {
+            pushToTvServer = new PushToTvServer(this, webListener);
+            pushToTvServer.start();
+        }
         MediaShelfManager.setShelfUpdateListener(() -> {
             if (adapter != null) adapter.notifyShelvesChanged();
         });
@@ -1604,7 +1612,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         RemoteKeys.release(this);
         cancelHoldOk();
         if (gameDay != null) gameDay.shutdown();
-        if (pushToTvServer != null) pushToTvServer.stop();
+        // Do NOT stop the web server here — it must survive Activity recreations and app switching.
+        // The server keeps running so long as the process is alive; it will only stop when the OS kills the app.
         if (stremioWatchdog != null) stremioWatchdog.cancelTimer();
         unregisterReceiver(packageReceiver);
         if (openOnStartOnWake) unregisterReceiver(wakeReceiver);
@@ -4209,6 +4218,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     }
 
     public void putTvToSleep() {
+        // Don't try to sleep if already sleeping
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        if (pm != null && !pm.isInteractive()) return;
         try {
             HomeKeyService hs = HomeKeyService.getRunning();
             if (hs != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {

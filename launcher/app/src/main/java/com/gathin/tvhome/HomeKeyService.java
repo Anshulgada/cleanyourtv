@@ -252,10 +252,25 @@ public class HomeKeyService extends AccessibilityService {
     private volatile boolean logcatRunning = false;
     private long lastSettingsKeyLaunchTime = 0;
     private long lastPowerKeyTime = 0;
+    /** Uptime (ms) before which we must NOT put the screen to sleep — protects the wake-up window. */
+    private volatile long sleepBlockedUntil = 0;
+    private static final long WAKE_GUARD_MS = 3000L;   // 3 s after screen-on before we allow sleep again
+    /** Receiver that resets the guard whenever the screen turns on. */
+    private BroadcastReceiver screenOnGuard;
 
     private void startLogcatKeyReader() {
         if (logcatRunning) return;
         logcatRunning = true;
+        // Arm the wake-guard on every screen-on so we can't immediately re-lock the screen.
+        if (screenOnGuard == null) {
+            sleepBlockedUntil = SystemClock.uptimeMillis() + WAKE_GUARD_MS; // guard boot window too
+            screenOnGuard = new BroadcastReceiver() {
+                @Override public void onReceive(Context ctx, Intent intent) {
+                    sleepBlockedUntil = SystemClock.uptimeMillis() + WAKE_GUARD_MS;
+                }
+            };
+            registerReceiver(screenOnGuard, new IntentFilter(Intent.ACTION_SCREEN_ON));
+        }
         logcatThread = new Thread(() -> {
             Process process = null;
             java.io.BufferedReader reader = null;
@@ -280,6 +295,8 @@ public class HomeKeyService extends AccessibilityService {
                                     handler.post(() -> {
                                         PowerManager pwr = getSystemService(PowerManager.class);
                                         if (pwr != null && !pwr.isInteractive()) return;
+                                        // Guard: don't re-lock during the wake-up window.
+                                        if (SystemClock.uptimeMillis() < sleepBlockedUntil) return;
                                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                                             performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
                                         } else {
@@ -319,6 +336,10 @@ public class HomeKeyService extends AccessibilityService {
         if (logcatThread != null) {
             logcatThread.interrupt();
             logcatThread = null;
+        }
+        if (screenOnGuard != null) {
+            try { unregisterReceiver(screenOnGuard); } catch (Exception ignored) {}
+            screenOnGuard = null;
         }
     }
 
@@ -366,6 +387,8 @@ public class HomeKeyService extends AccessibilityService {
             // While the screen is off the hardware MCU owns waking the TV; leave the key to the system then.
             if (power == null || power.isInteractive()) {
                 if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                    // Guard: don't re-lock during the wake-up window (prevents the dark-screen-then-off bug).
+                    if (SystemClock.uptimeMillis() < sleepBlockedUntil) return true;
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                         performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
                     } else {
