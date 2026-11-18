@@ -1687,7 +1687,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         if (eventKeyCode == KeyEvent.KEYCODE_POWER || eventKeyCode == KeyEvent.KEYCODE_SLEEP || eventKeyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
-                putTvToSleep();
+                toggleTvPower();
             }
             return true;
         }
@@ -4217,6 +4217,35 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
     }
 
+    public void toggleTvPower() {
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        if (pm != null && pm.isInteractive()) {
+            putTvToSleep();
+        } else {
+            wakeTvUp();
+        }
+    }
+
+    public void wakeTvUp() {
+        try {
+            Runtime.getRuntime().exec(new String[]{"input", "keyevent", "224"});
+            Runtime.getRuntime().exec(new String[]{"input", "keyevent", "3"});
+        } catch (Exception ignored) {}
+        try {
+            sendBroadcast(new Intent("android.intent.action.ACTION_PANEL_POWER_ON"));
+            sendBroadcast(new Intent("com.tcl.action.wakeup"));
+            sendBroadcast(new Intent("com.tcl.action.poweron"));
+        } catch (Exception ignored) {}
+        runOnUiThread(() -> {
+            Intent homeIntent = new Intent(Intent.ACTION_MAIN);
+            homeIntent.addCategory(Intent.CATEGORY_HOME);
+            homeIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            try {
+                startActivity(homeIntent);
+            } catch (Exception ignored) {}
+        });
+    }
+
     public void putTvToSleep() {
         // Don't try to sleep if already sleeping
         android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
@@ -4240,8 +4269,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     public void dispatchDpadKey(int keyCode) {
         try {
-            if (keyCode == KeyEvent.KEYCODE_POWER || keyCode == KeyEvent.KEYCODE_SLEEP
-                    || keyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
+            if (keyCode == KeyEvent.KEYCODE_POWER) {
+                runOnUiThread(this::toggleTvPower);
+                return;
+            } else if (keyCode == KeyEvent.KEYCODE_SLEEP || keyCode == KeyEvent.KEYCODE_SOFT_SLEEP) {
                 runOnUiThread(this::putTvToSleep);
                 return;
             }

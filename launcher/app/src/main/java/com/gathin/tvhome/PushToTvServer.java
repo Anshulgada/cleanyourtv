@@ -7,6 +7,7 @@ import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.text.format.Formatter;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -55,6 +56,8 @@ public final class PushToTvServer {
     private volatile boolean isRunning = false;
     private NsdManager nsdManager;
     private NsdManager.RegistrationListener registrationListener;
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
 
     public PushToTvServer(Context context, PushToTvListener listener) {
         this.context = context.getApplicationContext();
@@ -67,9 +70,45 @@ public final class PushToTvServer {
         this.listener = newListener;
     }
 
+    private void acquireLocks() {
+        try {
+            PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            if (pm != null && (wakeLock == null || !wakeLock.isHeld())) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CleanYourTV:WebServerWakeLock");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+            }
+            WifiManager wm = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && (wifiLock == null || !wifiLock.isHeld())) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "CleanYourTV:WebServerWifiLock");
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+            }
+            Log.i(TAG, "WakeLock and WifiLock acquired for 24/7 web remote");
+        } catch (Exception e) {
+            Log.w(TAG, "Could not acquire wake/wifi locks: " + e.getMessage());
+        }
+    }
+
+    private void releaseLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+        } catch (Exception ignored) {}
+        wakeLock = null;
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+            }
+        } catch (Exception ignored) {}
+        wifiLock = null;
+    }
+
     public synchronized void start() {
         if (isRunning) return;
         isRunning = true;
+        acquireLocks();
         executor.execute(this::runServer);
         registerNsdService();
     }
@@ -81,6 +120,7 @@ public final class PushToTvServer {
     public synchronized void stop() {
         isRunning = false;
         unregisterNsdService();
+        releaseLocks();
         try {
             if (serverSocket != null) {
                 serverSocket.close();
@@ -323,7 +363,7 @@ public final class PushToTvServer {
             case "PAUSE": return KeyEvent.KEYCODE_MEDIA_PAUSE;
             case "REWIND": return KeyEvent.KEYCODE_MEDIA_REWIND;
             case "FAST_FORWARD": return KeyEvent.KEYCODE_MEDIA_FAST_FORWARD;
-            case "POWER": return KeyEvent.KEYCODE_SLEEP;
+            case "POWER": return KeyEvent.KEYCODE_POWER;
             default: return 0;
         }
     }

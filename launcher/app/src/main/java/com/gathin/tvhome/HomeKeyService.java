@@ -258,15 +258,30 @@ public class HomeKeyService extends AccessibilityService {
     /** Receiver that resets the guard whenever the screen turns on. */
     private BroadcastReceiver screenOnGuard;
 
+    private void wakeUpDevice() {
+        sleepBlockedUntil = SystemClock.uptimeMillis() + WAKE_GUARD_MS;
+        try {
+            Runtime.getRuntime().exec(new String[]{"input", "keyevent", "224"});
+            Runtime.getRuntime().exec(new String[]{"input", "keyevent", "3"});
+        } catch (Exception ignored) {}
+        try {
+            sendBroadcast(new Intent("android.intent.action.ACTION_PANEL_POWER_ON"));
+            sendBroadcast(new Intent("com.tcl.action.wakeup"));
+            sendBroadcast(new Intent("com.tcl.action.poweron"));
+        } catch (Exception ignored) {}
+        openHome();
+    }
+
     private void startLogcatKeyReader() {
         if (logcatRunning) return;
         logcatRunning = true;
-        // Arm the wake-guard on every screen-on so we can't immediately re-lock the screen.
+        // Arm the wake-guard on every screen-on so we can't immediately re-lock the screen, and bring Home to front.
         if (screenOnGuard == null) {
             sleepBlockedUntil = SystemClock.uptimeMillis() + WAKE_GUARD_MS; // guard boot window too
             screenOnGuard = new BroadcastReceiver() {
                 @Override public void onReceive(Context ctx, Intent intent) {
                     sleepBlockedUntil = SystemClock.uptimeMillis() + WAKE_GUARD_MS;
+                    openHome();
                 }
             };
             registerReceiver(screenOnGuard, new IntentFilter(Intent.ACTION_SCREEN_ON));
@@ -294,7 +309,10 @@ public class HomeKeyService extends AccessibilityService {
                                 if (pm == null || pm.isInteractive()) {
                                     handler.post(() -> {
                                         PowerManager pwr = getSystemService(PowerManager.class);
-                                        if (pwr != null && !pwr.isInteractive()) return;
+                                        if (pwr != null && !pwr.isInteractive()) {
+                                            wakeUpDevice();
+                                            return;
+                                        }
                                         // Guard: don't re-lock during the wake-up window.
                                         if (SystemClock.uptimeMillis() < sleepBlockedUntil) return;
                                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -303,6 +321,8 @@ public class HomeKeyService extends AccessibilityService {
                                             performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
                                         }
                                     });
+                                } else {
+                                    handler.post(this::wakeUpDevice);
                                 }
                             }
                         }
@@ -379,12 +399,11 @@ public class HomeKeyService extends AccessibilityService {
             return true;
         }
         // TCL's phone window manager swallows KEYCODE_POWER and tries to start com.tcl.tv's GlobalKeyService, which
-        // is disabled, so the remote's Power button does nothing. Put the TV into standby ourselves instead.
+        // is disabled, so the remote's Power button does nothing. Toggle TV standby / wake ourselves instead.
         if (event.getKeyCode() == KeyEvent.KEYCODE_POWER || event.getScanCode() == 116
                 || event.getKeyCode() == KeyEvent.KEYCODE_SLEEP
                 || event.getKeyCode() == KeyEvent.KEYCODE_SOFT_SLEEP) {
             PowerManager power = getSystemService(PowerManager.class);
-            // While the screen is off the hardware MCU owns waking the TV; leave the key to the system then.
             if (power == null || power.isInteractive()) {
                 if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
                     // Guard: don't re-lock during the wake-up window (prevents the dark-screen-then-off bug).
@@ -396,8 +415,12 @@ public class HomeKeyService extends AccessibilityService {
                     }
                 }
                 return true;
+            } else {
+                if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                    wakeUpDevice();
+                }
+                return true;
             }
-            return false;
         }
         // power_on_home: the first key after power-on hands the TV to the user (power and wake keys don't count).
         if (powerOnUntil != 0 && event.getAction() == KeyEvent.ACTION_DOWN
